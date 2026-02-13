@@ -144,7 +144,7 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
         if field["env_var"] == "TRANSCRIPTION_AUTOSYNC_ENABLED"
     )
     assert autosync_field["configured"] is True
-    assert autosync_field["value"] == "false"
+    assert autosync_field["value"] == "true"
 
 
 def test_integrations_settings_patch_updates_only_current_user(client: TestClient) -> None:

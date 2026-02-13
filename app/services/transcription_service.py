@@ -631,7 +631,8 @@ class TranscriptionService:
         return score
 
     def _merge_settings_with_user_values(self, user_values: Mapping[str, str]) -> Settings:
-        overrides: dict[str, Any] = {}
+        # By product rule, autosync starts enabled unless the user explicitly disables it.
+        overrides: dict[str, Any] = {"transcription_autosync_enabled": True}
         for env_var, raw_value in user_values.items():
             attr_name = env_var.lower()
             if not hasattr(self.settings, attr_name):

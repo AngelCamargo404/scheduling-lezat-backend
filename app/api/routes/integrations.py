@@ -891,7 +891,7 @@ def _read_current_user_values(current_user: CurrentUserResponse) -> dict[str, st
     for env_var in EDITABLE_ENV_VARS:
         if env_var not in values:
             if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED":
-                values[env_var] = "true" if settings.transcription_autosync_enabled else "false"
+                values[env_var] = "true"
                 continue
             values[env_var] = ""
     return values
@@ -900,6 +900,9 @@ def _read_current_user_values(current_user: CurrentUserResponse) -> dict[str, st
 def _read_default_values_from_settings(settings: Settings) -> dict[str, str]:
     defaults: dict[str, str] = {}
     for env_var in EDITABLE_ENV_VARS:
+        if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED":
+            defaults[env_var] = "true"
+            continue
         attr_name = env_var.lower()
         if not hasattr(settings, attr_name):
             continue

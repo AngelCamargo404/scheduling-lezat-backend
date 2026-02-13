@@ -157,8 +157,11 @@ def _build_effective_settings_for_user(current_user: CurrentUserResponse) -> Set
     base_settings = get_settings()
     user_store = create_user_store(base_settings)
     user_values = user_store.get_user_settings_values(current_user.id)
+    merged_payload = base_settings.model_dump()
+    # By product rule, autosync starts enabled unless the user explicitly disables it.
+    merged_payload["transcription_autosync_enabled"] = True
     if not user_values:
-        return base_settings
+        return Settings.model_validate(merged_payload)
 
     overrides: dict[str, Any] = {}
     for env_var, raw_value in user_values.items():
@@ -185,6 +188,5 @@ def _build_effective_settings_for_user(current_user: CurrentUserResponse) -> Set
         else:
             overrides[attr_name] = raw_value
 
-    merged_payload = base_settings.model_dump()
     merged_payload.update(overrides)
     return Settings.model_validate(merged_payload)
