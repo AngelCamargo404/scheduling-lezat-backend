@@ -172,6 +172,12 @@ def _build_effective_settings_for_user(current_user: CurrentUserResponse) -> Set
                 for value in raw_value.split(",")
                 if value.strip()
             ]
+        elif isinstance(base_value, bool):
+            lowered = raw_value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                overrides[attr_name] = True
+            elif lowered in {"0", "false", "no", "off"}:
+                overrides[attr_name] = False
         elif isinstance(base_value, int):
             overrides[attr_name] = int(raw_value)
         elif isinstance(base_value, float):

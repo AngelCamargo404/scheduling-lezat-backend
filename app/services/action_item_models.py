@@ -51,6 +51,16 @@ class ActionItem:
             due_date = _infer_due_date_from_context(payload, reference_date=reference_date)
         details = _normalize_optional_text(payload.get("details"))
         source_sentence = _normalize_optional_text(payload.get("source_sentence"))
+        if not _looks_like_action_item(
+            title=title,
+            details=details,
+            source_sentence=source_sentence,
+            assignee_email=assignee_email,
+            assignee_name=assignee_name,
+            due_date=due_date,
+        ):
+            return None
+
         return cls(
             title=title,
             assignee_email=assignee_email,
@@ -86,7 +96,7 @@ def _normalize_due_date(value: Any, *, reference_date: date | None = None) -> st
     try:
         return date.fromisoformat(text).isoformat()
     except ValueError:
-        parsed_relative = _parse_relative_due_date(
+        parsed_relative = _parse_due_date_from_text(
             text=text,
             reference_date=reference_date or datetime.now(UTC).date(),
         )
@@ -104,14 +114,21 @@ def _infer_due_date_from_context(
         text = _normalize_optional_text(raw_value)
         if not text:
             continue
-        parsed = _parse_relative_due_date(text=text, reference_date=base_date)
+        parsed = _parse_due_date_from_text(text=text, reference_date=base_date)
         if parsed:
             return parsed.isoformat()
     return None
 
 
-def _parse_relative_due_date(*, text: str, reference_date: date) -> date | None:
+def _parse_due_date_from_text(*, text: str, reference_date: date) -> date | None:
     normalized = _normalize_for_matching(text)
+    parsed_absolute = _parse_absolute_due_date(normalized=normalized, reference_date=reference_date)
+    if parsed_absolute:
+        return parsed_absolute
+    return _parse_relative_due_date(normalized=normalized, reference_date=reference_date)
+
+
+def _parse_relative_due_date(*, normalized: str, reference_date: date) -> date | None:
 
     direct_tokens = (
         ("pasado manana", 2),
@@ -123,6 +140,16 @@ def _parse_relative_due_date(*, text: str, reference_date: date) -> date | None:
     for token, delta in direct_tokens:
         if re.search(rf"\b{token}\b", normalized):
             return reference_date + timedelta(days=delta)
+
+    compact_relative = re.fullmatch(
+        r"([a-z0-9]+)\s+(dia|dias|semana|semanas|mes|meses|ano|anos)",
+        normalized,
+    )
+    if compact_relative:
+        amount = _parse_spanish_integer(compact_relative.group(1))
+        if amount is not None:
+            unit = compact_relative.group(2)
+            return _apply_relative_amount(reference_date, amount, unit)
 
     for pattern in (
         r"\bdentro de\s+([a-z0-9]+)\s+(dia|dias|semana|semanas|mes|meses|ano|anos)\b",
@@ -151,6 +178,55 @@ def _parse_relative_due_date(*, text: str, reference_date: date) -> date | None:
         return _next_weekday(reference_date, weekday, strict_future=True)
 
     return None
+
+
+def _parse_absolute_due_date(*, normalized: str, reference_date: date) -> date | None:
+    pattern = (
+        r"\b(?:el\s+)?(\d{1,2})\s+de\s+"
+        r"(este mes|mes actual|enero|febrero|marzo|abril|abrir|mayo|junio|julio|agosto|"
+        r"septiembre|setiembre|octubre|noviembre|diciembre)"
+        r"(?:\s+de\s+(\d{4}))?\b"
+    )
+    match = re.search(pattern, normalized)
+    if not match:
+        return None
+
+    day = int(match.group(1))
+    month_token = match.group(2)
+    raw_year = match.group(3)
+    month = _month_from_token(month_token, reference_date=reference_date)
+    if month is None:
+        return None
+    year = int(raw_year) if raw_year else reference_date.year
+
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _month_from_token(token: str, *, reference_date: date) -> int | None:
+    cleaned = token.strip()
+    if cleaned in {"este mes", "mes actual"}:
+        return reference_date.month
+
+    months = {
+        "enero": 1,
+        "febrero": 2,
+        "marzo": 3,
+        "abril": 4,
+        "abrir": 4,
+        "mayo": 5,
+        "junio": 6,
+        "julio": 7,
+        "agosto": 8,
+        "septiembre": 9,
+        "setiembre": 9,
+        "octubre": 10,
+        "noviembre": 11,
+        "diciembre": 12,
+    }
+    return months.get(cleaned)
 
 
 def _apply_relative_amount(reference_date: date, amount: int, unit: str) -> date:
@@ -244,3 +320,165 @@ def _next_weekday(reference_date: date, weekday: int, *, strict_future: bool) ->
     if days_ahead < 0 or (strict_future and days_ahead == 0):
         days_ahead += 7
     return reference_date + timedelta(days=days_ahead)
+
+
+def _looks_like_action_item(
+    *,
+    title: str,
+    details: str | None,
+    source_sentence: str | None,
+    assignee_email: str | None,
+    assignee_name: str | None,
+    due_date: str | None,
+) -> bool:
+    normalized_title = _normalize_for_matching(title)
+    if _is_trivially_non_action_text(normalized_title):
+        return False
+
+    combined_text = " ".join(
+        value for value in (title, details or "", source_sentence or "") if value
+    )
+    normalized_combined = _normalize_for_matching(combined_text)
+    if _contains_action_marker(normalized_combined):
+        return True
+
+    has_assignment_signal = bool(assignee_email or assignee_name)
+    has_due_date_signal = bool(due_date)
+    if (has_assignment_signal or has_due_date_signal) and _is_non_generic_title(normalized_title):
+        return True
+
+    return False
+
+
+def _contains_action_marker(normalized_text: str) -> bool:
+    obligation_patterns = (
+        r"\b(tenemos que|tengo que|tienes que|debo|debes|debe|deberiamos|hay que)\b",
+        r"\b(pendiente|recordar|recordatorio|follow up|follow-up|to do|todo)\b",
+    )
+    for pattern in obligation_patterns:
+        if re.search(pattern, normalized_text):
+            return True
+
+    action_tokens = {
+        "enviar",
+        "enviamos",
+        "enviarle",
+        "preparar",
+        "prepara",
+        "revisar",
+        "revisa",
+        "crear",
+        "crea",
+        "actualizar",
+        "actualiza",
+        "compartir",
+        "comparte",
+        "coordinar",
+        "coordina",
+        "agendar",
+        "agenda",
+        "programar",
+        "programa",
+        "documentar",
+        "documenta",
+        "definir",
+        "define",
+        "confirmar",
+        "confirma",
+        "validar",
+        "valida",
+        "investigar",
+        "investiga",
+        "resolver",
+        "resuelve",
+        "entregar",
+        "entrega",
+        "completar",
+        "completa",
+        "terminar",
+        "termina",
+        "redactar",
+        "redacta",
+        "llamar",
+        "llama",
+        "contactar",
+        "contacta",
+        "escribir",
+        "escribe",
+        "subir",
+        "sube",
+        "priorizar",
+        "prioriza",
+        "send",
+        "prepare",
+        "review",
+        "create",
+        "update",
+        "share",
+        "schedule",
+        "call",
+        "deliver",
+        "finish",
+        "complete",
+    }
+    for token in re.findall(r"[a-z0-9]+", normalized_text):
+        if token in action_tokens:
+            return True
+    return False
+
+
+def _is_trivially_non_action_text(normalized_title: str) -> bool:
+    if not normalized_title:
+        return True
+
+    if re.fullmatch(
+        r"(ok|okay|si|claro|gracias|perfecto|entendido|listo|de acuerdo)",
+        normalized_title,
+    ):
+        return True
+
+    tokens = re.findall(r"[a-z0-9]+", normalized_title)
+    if not tokens:
+        return True
+    if len(tokens) == 1 and tokens[0].isdigit():
+        return True
+
+    return False
+
+
+def _is_non_generic_title(normalized_title: str) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", normalized_title)
+    if len(tokens) < 2:
+        return False
+
+    date_only_tokens = {
+        "hoy",
+        "manana",
+        "ayer",
+        "pasado",
+        "semana",
+        "semanas",
+        "mes",
+        "meses",
+        "ano",
+        "anos",
+        "este",
+        "actual",
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "abrir",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "setiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    }
+    if all(token.isdigit() or token in date_only_tokens for token in tokens):
+        return False
+    return True

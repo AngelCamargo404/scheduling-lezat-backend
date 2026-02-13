@@ -1,6 +1,6 @@
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from http.client import RemoteDisconnected
 from time import sleep
 from typing import Any
@@ -37,6 +37,7 @@ class GeminiActionItemsClient:
         reference_date = datetime.now(UTC).date()
         prompt = self._build_prompt(
             meeting_id=meeting_id,
+            reference_date=reference_date,
             transcript_text=transcript_text,
             transcript_sentences=transcript_sentences,
             participant_emails=participant_emails,
@@ -185,6 +186,7 @@ class GeminiActionItemsClient:
         self,
         *,
         meeting_id: str | None,
+        reference_date: date,
         transcript_text: str,
         transcript_sentences: list[dict[str, Any]],
         participant_emails: list[str],
@@ -195,13 +197,21 @@ class GeminiActionItemsClient:
         serialized_text = transcript_text.strip()
 
         return (
-            "Analiza esta reunion y extrae tareas accionables.\n"
-            "Si una tarea no tiene responsable claro, deja assignee_email "
-            "y assignee_name en null.\n"
-            "Si hay fecha relativa (ej: manana, pasado manana, dentro de 2 semanas), "
-            "convierte a YYYY-MM-DD tomando como referencia la fecha actual.\n"
+            "Analiza esta reunion y extrae SOLO tareas accionables reales.\n"
+            "No incluyas resumenes, opiniones, contexto, notas generales o texto que no sea tarea.\n"
+            "Una tarea valida debe implicar una accion concreta o compromiso verificable.\n"
+            "Si una tarea no tiene responsable claro, deja assignee_email y assignee_name en null.\n"
+            "Reglas de fecha:\n"
+            "- fecha_actual: "
+            f"{reference_date.isoformat()}\n"
+            f"- anio_actual: {reference_date.year}\n"
+            f"- mes_actual: {reference_date.month:02d}\n"
+            "- Si hay fecha relativa (manana, ayer, en 1 semana, dentro de 2 semanas, 1 mes), "
+            "convierte a YYYY-MM-DD tomando como base fecha_actual.\n"
+            "- Si aparece fecha tipo '23 de febrero' sin anio, usa anio_actual.\n"
+            "- Si aparece '25 de este mes', usa mes_actual y anio_actual.\n"
             "Si no existe una fecha inferible, deja due_date en null.\n"
-            "Incluye en source_sentence la frase exacta donde aparezca la pista temporal.\n"
+            "Incluye en source_sentence la frase exacta donde aparezca la tarea y/o la pista temporal.\n"
             "Devuelve un JSON con este formato exacto:\n"
             "{\n"
             '  "action_items": [\n'

@@ -146,6 +146,15 @@ FIELD_DEFINITIONS = (
         sensitive=True,
     ),
     IntegrationSettingFieldDefinition(
+        env_var="TRANSCRIPTION_AUTOSYNC_ENABLED",
+        label="Transcription Autosync Enabled",
+        description=(
+            "Habilita o deshabilita la creacion automatica de notas y eventos "
+            "a partir de transcripciones."
+        ),
+        group="fireflies",
+    ),
+    IntegrationSettingFieldDefinition(
         env_var="GEMINI_API_KEY",
         label="Gemini API Key",
         description="Token para extraer action items desde transcripciones.",
@@ -349,6 +358,7 @@ URL_ENV_VARS = frozenset(
 )
 CSV_URL_ENV_VARS = frozenset({"ALLOWED_ORIGINS"})
 ENUM_ENV_VARS: dict[str, set[str]] = {}
+ENUM_ENV_VARS["TRANSCRIPTION_AUTOSYNC_ENABLED"] = {"true", "false"}
 
 
 @router.get("/notion/connect")
@@ -880,6 +890,9 @@ def _read_current_user_values(current_user: CurrentUserResponse) -> dict[str, st
     values["GEMINI_MODEL"] = settings.gemini_model
     for env_var in EDITABLE_ENV_VARS:
         if env_var not in values:
+            if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED":
+                values[env_var] = "true" if settings.transcription_autosync_enabled else "false"
+                continue
             values[env_var] = ""
     return values
 
@@ -897,6 +910,8 @@ def _read_default_values_from_settings(settings: Settings) -> dict[str, str]:
                 for value in raw_value
                 if str(value).strip()
             )
+        elif isinstance(raw_value, bool):
+            normalized_value = "true" if raw_value else "false"
         elif raw_value is None:
             normalized_value = ""
         else:
@@ -934,7 +949,10 @@ def _normalize_updates(raw_values: dict[str, str]) -> dict[str, str]:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Environment variable {env_var} is not editable from this endpoint.",
             )
-        updates[env_var] = (raw_value or "").strip()
+        normalized_value = (raw_value or "").strip()
+        if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED" and normalized_value:
+            normalized_value = _normalize_boolean_text(normalized_value)
+        updates[env_var] = normalized_value
     return updates
 
 
@@ -1007,6 +1025,15 @@ def _assert_iso_date(env_var: str, value: str) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"{env_var} must be an ISO date in YYYY-MM-DD format.",
         ) from exc
+
+
+def _normalize_boolean_text(raw_value: str) -> str:
+    lowered = raw_value.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return "true"
+    if lowered in {"0", "false", "no", "off"}:
+        return "false"
+    return lowered
 
 
 def _build_pipeline_status(requirements: dict[str, bool]) -> IntegrationPipelineStatus:

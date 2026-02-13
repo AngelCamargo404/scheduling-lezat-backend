@@ -544,10 +544,28 @@ class TranscriptionService:
                 "synced_at": datetime.now(UTC),
             }
         sanitized_participants = sanitize_action_item_participants(participant_emails)
+        effective_settings = self.settings
         sync_service = self.action_item_sync_service
         if resolve_user_settings and not self._has_custom_action_item_sync_service:
             effective_settings = self._resolve_settings_for_participants(sanitized_participants)
             sync_service = ActionItemSyncService(effective_settings)
+        if not effective_settings.transcription_autosync_enabled:
+            return {
+                "status": "skipped_disabled_by_user",
+                "extracted_count": 0,
+                "created_count": 0,
+                "google_calendar_status": "not_required_disabled_by_user",
+                "google_calendar_created_count": 0,
+                "google_calendar_error": None,
+                "outlook_calendar_status": "not_required_disabled_by_user",
+                "outlook_calendar_created_count": 0,
+                "outlook_calendar_error": None,
+                "items": [],
+                "error": (
+                    "TRANSCRIPTION_AUTOSYNC_ENABLED is disabled for this user."
+                ),
+                "synced_at": datetime.now(UTC),
+            }
 
         try:
             return sync_service.sync(
@@ -605,6 +623,7 @@ class TranscriptionService:
             "GOOGLE_CALENDAR_API_TOKEN",
             "GOOGLE_CALENDAR_REFRESH_TOKEN",
             "OUTLOOK_CALENDAR_API_TOKEN",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED",
         ):
             raw_value = user_values.get(env_var, "")
             if raw_value.strip():

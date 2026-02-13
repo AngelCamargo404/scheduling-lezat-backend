@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     fireflies_api_timeout_seconds: float = 10.0
     fireflies_api_user_agent: str = "LezatSchedulingBackend/1.0"
     read_ai_webhook_secret: str = ""
+    transcription_autosync_enabled: bool = True
     transcriptions_store: str = "mongodb"
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db_name: str = "lezat_scheduling"

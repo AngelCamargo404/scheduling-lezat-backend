@@ -91,3 +91,46 @@ def test_extract_action_items_fails_after_retries_on_remote_disconnect(
         )
 
     assert calls["count"] == 3
+
+
+def test_extract_action_items_filters_non_actionable_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(*args: object, **kwargs: object) -> _FakeResponse:
+        return _FakeResponse(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"action_items":['
+                                        '{"title":"Resumen general de la reunion"},'
+                                        '{"title":"Enviar propuesta"}'
+                                        "]}"
+                                    ),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr("app.services.gemini_action_items_client.request.urlopen", fake_urlopen)
+
+    client = GeminiActionItemsClient(
+        api_key="fake-api-key",
+        model="gemini-3-flash-preview",
+        timeout_seconds=0.1,
+    )
+    items = client.extract_action_items(
+        meeting_id="meeting-3",
+        transcript_text="Resumen de reunion. Enviar propuesta.",
+        transcript_sentences=[],
+        participant_emails=[],
+    )
+
+    assert len(items) == 1
+    assert items[0].title == "Enviar propuesta"

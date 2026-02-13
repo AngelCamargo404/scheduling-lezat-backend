@@ -113,6 +113,7 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     client: TestClient,
 ) -> None:
     monkeypatch.setenv("FIREFLIES_API_KEY", "seed-fireflies-token")
+    monkeypatch.setenv("TRANSCRIPTION_AUTOSYNC_ENABLED", "false")
     monkeypatch.setenv("NOTION_TASK_STATUS_PROPERTY", "Status")
     monkeypatch.setenv(
         "NOTION_REDIRECT_URI",
@@ -137,6 +138,13 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     assert fireflies_key_field["configured"] is True
     assert fireflies_key_field["sensitive"] is True
     assert fireflies_key_field["value"] is None
+    autosync_field = next(
+        field
+        for field in fireflies_group["fields"]
+        if field["env_var"] == "TRANSCRIPTION_AUTOSYNC_ENABLED"
+    )
+    assert autosync_field["configured"] is True
+    assert autosync_field["value"] == "false"
 
 
 def test_integrations_settings_patch_updates_only_current_user(client: TestClient) -> None:
@@ -216,6 +224,34 @@ def test_integrations_settings_patch_validates_values(client: TestClient) -> Non
         headers={"Authorization": f"Bearer {token}"},
     )
     assert invalid_date_response.status_code == 422
+
+
+def test_integrations_settings_patch_normalizes_transcription_autosync_toggle(
+    client: TestClient,
+) -> None:
+    token = _login_admin(client)
+
+    patch_response = client.patch(
+        "/api/integrations/settings",
+        json={"values": {"TRANSCRIPTION_AUTOSYNC_ENABLED": "off"}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert patch_response.status_code == 200
+
+    settings_response = client.get(
+        "/api/integrations/settings",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert settings_response.status_code == 200
+    fireflies_group = next(
+        group for group in settings_response.json()["groups"] if group["id"] == "fireflies"
+    )
+    autosync_field = next(
+        field
+        for field in fireflies_group["fields"]
+        if field["env_var"] == "TRANSCRIPTION_AUTOSYNC_ENABLED"
+    )
+    assert autosync_field["value"] == "false"
 
 
 def test_google_calendar_connect_redirects_to_google_oauth(

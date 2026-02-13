@@ -441,3 +441,50 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
     assert captured_tokens["notion_db"] == "user-notion-db"
     assert captured_tokens["google"] == "user-google-token"
     assert captured_tokens["outlook"] == "user-outlook-token"
+
+
+def test_webhook_skips_action_item_sync_when_autosync_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_AUTOSYNC_ENABLED", "false")
+    get_settings.cache_clear()
+
+    calls = {"sync": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+    ) -> dict[str, object]:
+        calls["sync"] += 1
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {"id": "meeting-autosync-off-1", "platform": "google_meet"},
+        "transcript": {"text": "Crear tarea de seguimiento para el viernes."},
+    }
+    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "skipped_disabled_by_user"
+    assert response_payload["action_items_created_count"] == 0
+    assert calls["sync"] == 0
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-autosync-off-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    assert stored_record["action_items_sync"]["status"] == "skipped_disabled_by_user"
+    assert stored_record["action_items_sync"]["created_count"] == 0

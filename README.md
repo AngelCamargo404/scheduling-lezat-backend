@@ -58,6 +58,7 @@ FIREFLIES_API_KEY=<api-key-fireflies>
 FIREFLIES_API_TIMEOUT_SECONDS=10
 FIREFLIES_API_USER_AGENT=LezatSchedulingBackend/1.0
 READ_AI_WEBHOOK_SECRET=<secreto-compartido>
+TRANSCRIPTION_AUTOSYNC_ENABLED=true
 TRANSCRIPTIONS_STORE=mongodb
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB_NAME=lezat_scheduling
@@ -145,6 +146,7 @@ http://localhost:8000/api/health
 - Cada nota/tarea creada en Notion desde una transcripcion se registra ademas en MongoDB (coleccion `action_item_creations`) con meeting id, pagina de Notion y estado de sincronizacion con calendarios.
 - En respuestas de consulta (`/received`, `/received/{record_id}`, `/received/by-meeting/{meeting_id}`), los registros de Fireflies exponen `transcript_sentences` (oraciones con speaker y tiempos) y `participant_emails` (emails unificados de participantes).
 - Si configuras Gemini + Notion, cada webhook intenta extraer tareas de la reunion y crear tarjetas en un Kanban de Notion usando la propiedad de estado configurada.
+- Si `TRANSCRIPTION_AUTOSYNC_ENABLED=false`, el backend sigue recibiendo y guardando la transcripcion, pero omite la creacion automatica de notas y eventos.
 - Si una tarea extraida incluye fecha de entrega (`due_date`) y configuras `GOOGLE_CALENDAR_API_TOKEN`, el backend tambien crea un evento de dia completo en Google Calendar con el contexto de la reunion en la descripcion.
 - Para pruebas controladas, puedes forzar fecha en tareas sin `due_date` usando `ACTION_ITEMS_TEST_DUE_DATE=YYYY-MM-DD`.
 - Si tienes registros antiguos sin texto, usa `POST /api/transcriptions/backfill/{meeting_id}` para reconsultar Fireflies y actualizar los documentos existentes por ese `meeting_id`.
