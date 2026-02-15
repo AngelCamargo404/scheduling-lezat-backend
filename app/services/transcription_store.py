@@ -175,6 +175,7 @@ def build_transcription_document(
     enrichment_error: str | None,
     action_items_sync: Mapping[str, Any] | None,
     fireflies_transcript: Mapping[str, Any] | None,
+    read_ai_transcript: Mapping[str, Any] | None = None,
     raw_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -191,6 +192,7 @@ def build_transcription_document(
         "enrichment_error": enrichment_error,
         "action_items_sync": dict(action_items_sync) if action_items_sync else None,
         "fireflies_transcript": dict(fireflies_transcript) if fireflies_transcript else None,
+        "read_ai_transcript": dict(read_ai_transcript) if read_ai_transcript else None,
         "raw_payload": dict(raw_payload),
         "received_at": datetime.now(UTC),
     }

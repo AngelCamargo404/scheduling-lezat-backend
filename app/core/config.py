@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     fireflies_api_key: str = ""
     fireflies_api_timeout_seconds: float = 10.0
     fireflies_api_user_agent: str = "LezatSchedulingBackend/1.0"
-    read_ai_webhook_secret: str = ""
+    read_ai_api_url: str = "https://api.read.ai/v1"
+    read_ai_api_key: str = ""
+    read_ai_api_timeout_seconds: float = 10.0
+    read_ai_api_user_agent: str = "LezatSchedulingBackend/1.0"
     transcription_autosync_enabled: bool = True
     transcriptions_store: str = "mongodb"
     mongodb_uri: str = "mongodb://localhost:27017"
@@ -44,6 +47,7 @@ class Settings(BaseSettings):
     frontend_base_url: str = "http://localhost:3000"
     notion_api_token: str = ""
     notion_tasks_database_id: str = ""
+    notion_calendar_database_id: str = ""
     notion_api_timeout_seconds: float = 10.0
     notion_api_version: str = "2022-06-28"
     notion_kanban_todo_status: str = "Por hacer"

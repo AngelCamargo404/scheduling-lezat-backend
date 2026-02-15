@@ -26,6 +26,7 @@ from app.services.action_item_sync_service import (
     sanitize_action_item_participants,
 )
 from app.services.fireflies_api_client import FirefliesApiClient, FirefliesApiError
+from app.services.read_ai_api_client import ReadAiApiClient, ReadAiApiError
 from app.services.transcription_store import (
     TranscriptionStore,
     build_transcription_document,
@@ -40,6 +41,7 @@ class TranscriptionService:
         settings: Settings,
         store: TranscriptionStore | None = None,
         fireflies_client: FirefliesApiClient | None = None,
+        read_ai_client: ReadAiApiClient | None = None,
         action_item_sync_service: ActionItemSyncService | None = None,
         action_item_creation_store: ActionItemCreationStore | None = None,
         user_store: UserStore | None = None,
@@ -53,6 +55,7 @@ class TranscriptionService:
             mongodb_connect_timeout_ms=settings.mongodb_connect_timeout_ms,
         )
         self.fireflies_client = fireflies_client or self._create_fireflies_client()
+        self.read_ai_client = read_ai_client or self._create_read_ai_client()
         self.action_item_sync_service = action_item_sync_service or ActionItemSyncService(settings)
         self.action_item_creation_store = (
             action_item_creation_store
@@ -134,6 +137,7 @@ class TranscriptionService:
         enrichment_status = "not_required"
         enrichment_error: str | None = None
         fireflies_transcript: dict[str, Any] | None = None
+        read_ai_transcript: dict[str, Any] | None = None
 
         if provider == TranscriptionProvider.fireflies:
             (
@@ -149,11 +153,42 @@ class TranscriptionService:
                 transcript_text=transcript_text,
                 meeting_url=meeting_url,
             )
+        elif provider == TranscriptionProvider.read_ai:
+             (
+                transcript_text,
+                transcript_id,
+                meeting_url,
+                read_ai_transcript,
+                enrichment_status,
+                enrichment_error,
+            ) = self._enrich_read_ai_transcript(
+                meeting_id=meeting_id,
+                transcript_id=transcript_id,
+                transcript_text=transcript_text,
+                meeting_url=meeting_url,
+            )
 
-        transcript_sentences = extract_sentences_for_action_items(fireflies_transcript)
-        participant_emails = self._extract_participant_emails(fireflies_transcript)
+        transcript_sentences: list[dict[str, Any]] = []
+        participant_emails: list[str] = []
+
+        if fireflies_transcript:
+            transcript_sentences = extract_sentences_for_action_items(fireflies_transcript)
+            participant_emails = self._extract_participant_emails(fireflies_transcript)
+        elif read_ai_transcript:
+            read_ai_sentences_objs = self._extract_read_ai_sentences(read_ai_transcript)
+            transcript_sentences = [
+                {
+                    "text": s.text, 
+                    "speaker_name": s.speaker_name, 
+                    "start_time": s.start_time
+                } 
+                for s in read_ai_sentences_objs
+            ]
+            participant_emails = self._extract_read_ai_participant_emails(read_ai_transcript)
+
         if not participant_emails:
             participant_emails = self._extract_participant_emails_from_payload(payload)
+
         action_items_sync = self._sync_action_items(
             meeting_id=meeting_id,
             transcript_text=transcript_text,
@@ -181,6 +216,7 @@ class TranscriptionService:
             enrichment_error=enrichment_error,
             action_items_sync=action_items_sync,
             fireflies_transcript=fireflies_transcript,
+            read_ai_transcript=read_ai_transcript,
             raw_payload=payload,
         )
 
@@ -363,11 +399,12 @@ class TranscriptionService:
         raw_body: bytes | None,
         signature: str | None,
     ) -> None:
+        if provider == TranscriptionProvider.read_ai:
+            return
+
         expected_secret = ""
         if provider == TranscriptionProvider.fireflies:
             expected_secret = self.settings.fireflies_webhook_secret
-        elif provider == TranscriptionProvider.read_ai:
-            expected_secret = self.settings.read_ai_webhook_secret
 
         if not expected_secret:
             return
@@ -385,14 +422,6 @@ class TranscriptionService:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid webhook signature.",
             )
-
-        if shared_secret == expected_secret:
-            return
-
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid webhook secret.",
-        )
 
     def _is_valid_hmac_signature(self, payload: bytes, signature: str, secret: str) -> bool:
         provided_signature = signature.strip()
@@ -500,8 +529,162 @@ class TranscriptionService:
             user_agent=self.settings.fireflies_api_user_agent,
         )
 
+    def _enrich_read_ai_transcript(
+        self,
+        meeting_id: str | None,
+        transcript_id: str | None,
+        transcript_text: str | None,
+        meeting_url: str | None,
+    ) -> tuple[str | None, str | None, str | None, dict[str, Any] | None, str, str | None]:
+        if not meeting_id:
+            return (
+                transcript_text,
+                transcript_id,
+                meeting_url,
+                None,
+                "skipped_no_meeting_id",
+                "No meeting_id provided in webhook.",
+            )
+
+        if not self.read_ai_client:
+            return (
+                transcript_text,
+                transcript_id,
+                meeting_url,
+                None,
+                "skipped_missing_api_key",
+                "READ_AI_API_KEY is not configured.",
+            )
+
+        try:
+            read_ai_transcript = self._fetch_read_ai_transcript(meeting_id)
+        except ReadAiApiError as exc:
+            return (
+                transcript_text,
+                transcript_id,
+                meeting_url,
+                None,
+                "failed_fetch",
+                str(exc),
+            )
+
+        text_from_read_ai = self._extract_read_ai_text(read_ai_transcript)
+        
+        return (
+            text_from_read_ai or transcript_text,
+            transcript_id,
+            meeting_url,
+            read_ai_transcript,
+            "completed",
+            None,
+        )
+
+    def _fetch_read_ai_transcript(self, meeting_id: str) -> dict[str, Any]:
+        if not self.read_ai_client:
+             raise ReadAiApiError("Read AI API client is not configured.")
+        return self.read_ai_client.fetch_meeting_details(meeting_id)
+
+    def _extract_read_ai_text(self, transcript_data: Mapping[str, Any]) -> str | None:
+        explicit_text = self._extract_first_string(transcript_data, ("transcript_text", "text", "content"))
+        if explicit_text:
+            return explicit_text
+
+        sentences = self._extract_read_ai_sentences(transcript_data)
+        if sentences:
+            return "\n".join(s.text for s in sentences)
+            
+        return None
+
+    def _extract_read_ai_sentences(
+        self,
+        read_ai_transcript: Mapping[str, Any] | None,
+    ) -> list[TranscriptionSentence]:
+        if not read_ai_transcript:
+            return []
+
+        raw_list = None
+        for key in ("transcript", "segments", "timeline", "sentences"):
+             val = read_ai_transcript.get(key)
+             if isinstance(val, list):
+                 raw_list = val
+                 break
+        
+        if not raw_list:
+            return []
+
+        sentences: list[TranscriptionSentence] = []
+        for idx, item in enumerate(raw_list):
+            if not isinstance(item, Mapping):
+                continue
+            
+            text = self._to_text(item.get("text") or item.get("content"))
+            if not text:
+                continue
+
+            speaker_name = self._to_text(item.get("speaker_name") or item.get("speaker"))
+            
+            start_time = self._to_float(item.get("start_time") or item.get("start") or item.get("startTime"))
+            end_time = self._to_float(item.get("end_time") or item.get("end") or item.get("endTime"))
+
+            sentences.append(
+                TranscriptionSentence(
+                    index=idx,
+                    speaker_name=speaker_name,
+                    speaker_id=None,
+                    text=text,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+            )
+        return sentences
+
+    def _extract_read_ai_participant_emails(
+        self,
+         read_ai_transcript: Mapping[str, Any] | None,
+    ) -> list[str]:
+        if not read_ai_transcript:
+            return []
+        
+        emails: set[str] = set()
+        participants = read_ai_transcript.get("participants")
+        if isinstance(participants, list):
+            for p in participants:
+                if isinstance(p, Mapping):
+                    email = self._to_text(p.get("email"))
+                    if email and "@" in email:
+                        emails.add(email.lower())
+                elif isinstance(p, str) and "@" in p:
+                     emails.add(p.strip().lower())
+        return list(emails)
+
+    def _create_read_ai_client(self) -> ReadAiApiClient | None:
+        if not self.settings.read_ai_api_key:
+            return None
+        return ReadAiApiClient(
+            api_url=self.settings.read_ai_api_url,
+            api_key=self.settings.read_ai_api_key,
+            timeout_seconds=self.settings.read_ai_api_timeout_seconds,
+            user_agent=self.settings.read_ai_api_user_agent,
+        )
+
     def _map_record(self, record: Mapping[str, Any]) -> TranscriptionRecord:
         raw_fireflies_transcript = self._to_mapping(record.get("fireflies_transcript"))
+        raw_read_ai_transcript = self._to_mapping(record.get("read_ai_transcript"))
+        
+        # Determine sentences source
+        sentences = []
+        if raw_fireflies_transcript:
+             sentences = self._extract_transcription_sentences(raw_fireflies_transcript)
+        elif raw_read_ai_transcript:
+             sentences = self._extract_read_ai_sentences(raw_read_ai_transcript)
+
+        # Determine participant emails source
+        participant_emails = []
+        if raw_fireflies_transcript:
+            participant_emails = self._extract_participant_emails(raw_fireflies_transcript)
+        elif raw_read_ai_transcript:
+            participant_emails = self._extract_read_ai_participant_emails(raw_read_ai_transcript)
+
         return TranscriptionRecord(
             id=str(record.get("_id", "")),
             provider=TranscriptionProvider(str(record.get("provider", "fireflies"))),
@@ -513,14 +696,13 @@ class TranscriptionService:
             is_google_meet=bool(record.get("is_google_meet", False)),
             transcript_text_available=bool(record.get("transcript_text_available", False)),
             transcript_text=self._to_text(record.get("transcript_text")),
-            transcript_sentences=self._extract_transcription_sentences(
-                raw_fireflies_transcript,
-            ),
-            participant_emails=self._extract_participant_emails(raw_fireflies_transcript),
+            transcript_sentences=sentences,
+            participant_emails=participant_emails,
             enrichment_status=self._to_text(record.get("enrichment_status")),
             enrichment_error=self._to_text(record.get("enrichment_error")),
             action_items_sync=self._to_mapping(record.get("action_items_sync")),
             fireflies_transcript=raw_fireflies_transcript,
+            read_ai_transcript=raw_read_ai_transcript,
             raw_payload=dict(record.get("raw_payload", {})),
             received_at=self._to_datetime(record.get("received_at")),
         )

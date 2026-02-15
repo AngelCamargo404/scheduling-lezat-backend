@@ -54,6 +54,7 @@ class TranscriptionRecord(BaseModel):
     enrichment_error: str | None = None
     action_items_sync: dict[str, Any] | None = None
     fireflies_transcript: dict[str, Any] | None = None
+    read_ai_transcript: dict[str, Any] | None = None
     raw_payload: dict[str, Any]
     received_at: datetime
 

@@ -29,7 +29,6 @@ def clear_settings_cache() -> None:
     monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "admin")
     monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", "")
     monkeypatch.setenv("FIREFLIES_API_KEY", "")
-    monkeypatch.setenv("READ_AI_WEBHOOK_SECRET", "")
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("NOTION_API_TOKEN", "")
     monkeypatch.setenv("NOTION_TASKS_DATABASE_ID", "")

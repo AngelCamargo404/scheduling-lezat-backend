@@ -78,6 +78,11 @@ GROUP_DEFINITIONS = (
         description="Creacion de notas/tareas en Notion con token de integracion.",
     ),
     IntegrationSettingGroupDefinition(
+        id="notion_calendar_sync",
+        title="Notion Calendar Sync (token)",
+        description="Creacion de eventos en calendario de Notion.",
+    ),
+    IntegrationSettingGroupDefinition(
         id="google_calendar_sync",
         title="Google Calendar Sync (token)",
         description="Creacion de eventos por fechas de entrega detectadas.",
@@ -139,11 +144,18 @@ FIELD_DEFINITIONS = (
         group="fireflies",
     ),
     IntegrationSettingFieldDefinition(
-        env_var="READ_AI_WEBHOOK_SECRET",
-        label="Read AI Webhook Secret",
-        description="Secreto compartido para validar webhook de Read AI.",
+        env_var="READ_AI_API_KEY",
+        label="Read AI API Key",
+        description="Token para consultar detalles de reuniones en Read AI.",
         group="read_ai",
         sensitive=True,
+        required_for=("read_ai_transcript_enrichment",),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="READ_AI_API_URL",
+        label="Read AI API URL",
+        description="Endpoint base de la API de Read AI.",
+        group="read_ai",
     ),
     IntegrationSettingFieldDefinition(
         env_var="TRANSCRIPTION_AUTOSYNC_ENABLED",
@@ -188,6 +200,13 @@ FIELD_DEFINITIONS = (
         description="Database ID del kanban de tareas.",
         group="notion_sync",
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="NOTION_CALENDAR_DATABASE_ID",
+        label="Notion Calendar Database ID",
+        description="Database ID del calendario de Notion.",
+        group="notion_calendar_sync",
+        required_for=("notion_calendar_events_creation",),
     ),
     IntegrationSettingFieldDefinition(
         env_var="NOTION_TASK_STATUS_PROPERTY",
@@ -760,10 +779,11 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
     credentials = IntegrationCredentialStatus(
         fireflies_api_key_configured=is_configured("FIREFLIES_API_KEY"),
         fireflies_webhook_secret_configured=is_configured("FIREFLIES_WEBHOOK_SECRET"),
-        read_ai_webhook_secret_configured=is_configured("READ_AI_WEBHOOK_SECRET"),
+        read_ai_api_key_configured=is_configured("READ_AI_API_KEY"),
         gemini_api_key_configured=is_configured("GEMINI_API_KEY"),
         notion_api_token_configured=is_configured("NOTION_API_TOKEN"),
         notion_tasks_database_id_configured=is_configured("NOTION_TASKS_DATABASE_ID"),
+        notion_calendar_database_id_configured=is_configured("NOTION_CALENDAR_DATABASE_ID"),
         google_calendar_api_token_configured=is_configured("GOOGLE_CALENDAR_API_TOKEN"),
         notion_client_id_configured=is_configured("NOTION_CLIENT_ID"),
         notion_client_secret_configured=is_configured("NOTION_CLIENT_SECRET"),
@@ -783,6 +803,11 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
             },
         ),
+        read_ai_transcript_enrichment=_build_pipeline_status(
+            {
+                "READ_AI_API_KEY": credentials.read_ai_api_key_configured,
+            },
+        ),
         notion_notes_creation=_build_pipeline_status(
             {
                 "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
@@ -790,7 +815,15 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_API_TOKEN": credentials.notion_api_token_configured,
                 "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
                 "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
+          
+        notion_calendar_events_creation=_build_pipeline_status(
+            {
+                "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
+                "GEMINI_API_KEY": credentials.gemini_api_key_configured,
+                "NOTION_API_TOKEN": credentials.notion_api_token_configured,
+                "NOTION_CALENDAR_DATABASE_ID": credentials.notion_calendar_database_id_configured,
             },
+        ),  },
         ),
         google_calendar_due_date_events=_build_pipeline_status(
             {

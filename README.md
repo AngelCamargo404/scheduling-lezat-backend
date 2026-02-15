@@ -140,7 +140,7 @@ http://localhost:8000/api/health
 - Los endpoints reciben JSON crudo y normalizan campos clave (meeting id, provider, plataforma y disponibilidad de transcript).
 - Fireflies: si configuras `FIREFLIES_WEBHOOK_SECRET`, el backend valida `x-hub-signature` (HMAC SHA-256) del payload. Para pruebas manuales tambien acepta `X-Webhook-Secret` o `Authorization: Bearer <token>`.
 - Fireflies: cuando llega `eventType=Transcription completed`, el backend usa `meetingId` para consultar la API GraphQL de Fireflies y traer la transcripcion final.
-- READ AI: si configuras `READ_AI_WEBHOOK_SECRET`, debes enviar el secreto en `X-Webhook-Secret` o `Authorization: Bearer <token>`.
+- READ AI: No requiere validacion de secreto (`READ_AI_WEBHOOK_SECRET` no se usa). El webhook se asocia por API Key.
 - El backend identifica si el meeting corresponde a Google Meet usando `meeting.platform` o `meeting.url`.
 - Cada webhook aceptado se guarda en MongoDB (coleccion `transcriptions`) con payload crudo, `client_reference_id`, estado de enriquecimiento (`enrichment_status`) y transcripcion de Fireflies cuando esta disponible.
 - Cada nota/tarea creada en Notion desde una transcripcion se registra ademas en MongoDB (coleccion `action_item_creations`) con meeting id, pagina de Notion y estado de sincronizacion con calendarios.
