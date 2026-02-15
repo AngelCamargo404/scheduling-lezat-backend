@@ -114,6 +114,8 @@ class TranscriptionService:
                 "meeting.external_id",
                 "meetingId",
                 "meeting_id",
+                "session_id",
+                "uuid",
             ),
         )
         client_reference_id = self._extract_first_string(
@@ -185,6 +187,17 @@ class TranscriptionService:
                 for s in read_ai_sentences_objs
             ]
             participant_emails = self._extract_read_ai_participant_emails(read_ai_transcript)
+        elif provider == TranscriptionProvider.read_ai:
+             read_ai_sentences_objs = self._extract_read_ai_sentences(payload)
+             transcript_sentences = [
+                {
+                    "text": s.text, 
+                    "speaker_name": s.speaker_name, 
+                    "start_time": s.start_time
+                } 
+                for s in read_ai_sentences_objs
+            ]
+             participant_emails = self._extract_read_ai_participant_emails(payload)
 
         if not participant_emails:
             participant_emails = self._extract_participant_emails_from_payload(payload)
@@ -609,6 +622,11 @@ class TranscriptionService:
                  raw_list = val
                  break
         
+        if not raw_list and isinstance(read_ai_transcript.get("transcript"), Mapping):
+             val = read_ai_transcript["transcript"].get("speaker_blocks")
+             if isinstance(val, list):
+                 raw_list = val
+        
         if not raw_list:
             return []
 
@@ -617,13 +635,28 @@ class TranscriptionService:
             if not isinstance(item, Mapping):
                 continue
             
-            text = self._to_text(item.get("text") or item.get("content"))
+            text = self._to_text(item.get("text") or item.get("content") or item.get("words"))
             if not text:
                 continue
 
             speaker_name = self._to_text(item.get("speaker_name") or item.get("speaker"))
+            speaker_block_speaker = item.get("speaker")
+            if not speaker_name and isinstance(speaker_block_speaker, Mapping):
+                 speaker_name = self._to_text(speaker_block_speaker.get("name"))
             
             start_time = self._to_float(item.get("start_time") or item.get("start") or item.get("startTime"))
+            if isinstance(item.get("start_time"), Mapping): # mongo style { $numberLong: ... }
+                 # This might happen if payload is already from DB dump but here we have raw payload.
+                 # The user payload shows { "$numberLong": "..." } which indicates it might be coming from MongoDB Extended JSON or similar, 
+                 # OR the raw payload actually has this format?
+                 # Wait, raw payload usually has standard JSON. 
+                 # The user provided "Guardado en la base de datos", so that structure is from DB.
+                 # But raw_payload field in DB stores the original payload.
+                 # If the original payload has { $numberLong ... }, usually that's unusual for webhooks unless it's BSON dump.
+                 # Assuming user provided what is stored in Mongo. 
+                 # If webhook sends standard JSON, start_time is likely a number or string.
+                 pass
+
             end_time = self._to_float(item.get("end_time") or item.get("end") or item.get("endTime"))
 
             sentences.append(
@@ -1057,6 +1090,7 @@ class TranscriptionService:
             "meeting.transcript",
             "sentences",
             "paragraphs",
+            "transcript.speaker_blocks",
         )
         for path in candidate_paths:
             raw_value = self._extract_path(payload, path)
@@ -1115,10 +1149,13 @@ class TranscriptionService:
                 return None
             return "\n".join(parts)
         if isinstance(value, Mapping):
-            for key in ("text", "content", "transcript", "value"):
+            for key in ("text", "content", "transcript", "value", "words"):
                 text = self._to_text(value.get(key))
                 if text:
                     return text
+            # Handle Read AI speaker_blocks structure implicitly via list recursion
+            if "speaker_blocks" in value:
+                return self._to_text(value["speaker_blocks"])
             return None
         return str(value)
 

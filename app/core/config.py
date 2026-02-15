@@ -47,7 +47,6 @@ class Settings(BaseSettings):
     frontend_base_url: str = "http://localhost:3000"
     notion_api_token: str = ""
     notion_tasks_database_id: str = ""
-    notion_calendar_database_id: str = ""
     notion_api_timeout_seconds: float = 10.0
     notion_api_version: str = "2022-06-28"
     notion_kanban_todo_status: str = "Por hacer"

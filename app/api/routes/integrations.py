@@ -26,6 +26,7 @@ from app.schemas.integration import (
     IntegrationSettingsGroup,
 )
 from app.services.auth_service import AuthService, require_current_user
+from app.services.notion_kanban_client import NotionKanbanClient
 from app.services.security_utils import create_access_token, decode_access_token
 from app.services.user_store import UserStore, create_user_store
 
@@ -76,11 +77,6 @@ GROUP_DEFINITIONS = (
         id="notion_sync",
         title="Notion Sync (token)",
         description="Creacion de notas/tareas en Notion con token de integracion.",
-    ),
-    IntegrationSettingGroupDefinition(
-        id="notion_calendar_sync",
-        title="Notion Calendar Sync (token)",
-        description="Creacion de eventos en calendario de Notion.",
     ),
     IntegrationSettingGroupDefinition(
         id="google_calendar_sync",
@@ -200,13 +196,6 @@ FIELD_DEFINITIONS = (
         description="Database ID del kanban de tareas.",
         group="notion_sync",
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
-    ),
-    IntegrationSettingFieldDefinition(
-        env_var="NOTION_CALENDAR_DATABASE_ID",
-        label="Notion Calendar Database ID",
-        description="Database ID del calendario de Notion.",
-        group="notion_calendar_sync",
-        required_for=("notion_calendar_events_creation",),
     ),
     IntegrationSettingFieldDefinition(
         env_var="NOTION_TASK_STATUS_PROPERTY",
@@ -491,6 +480,23 @@ def finish_notion_oauth(
         {"NOTION_API_TOKEN": notion_access_token},
     )
     return _build_notion_oauth_redirect("success", "connected")
+
+
+@router.get("/notion/databases")
+def get_notion_accessible_databases(
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> list[dict]:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("NOTION_API_TOKEN", "")
+    if not token.strip():
+        return []
+
+    # Use existing token to list databases. database_id is optional for listing.
+    client = NotionKanbanClient(api_token=token, database_id="")
+    try:
+        return client.list_accessible_databases()
+    except Exception:
+        return []
 
 
 @router.get("/google-calendar/connect")
@@ -783,7 +789,6 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
         gemini_api_key_configured=is_configured("GEMINI_API_KEY"),
         notion_api_token_configured=is_configured("NOTION_API_TOKEN"),
         notion_tasks_database_id_configured=is_configured("NOTION_TASKS_DATABASE_ID"),
-        notion_calendar_database_id_configured=is_configured("NOTION_CALENDAR_DATABASE_ID"),
         google_calendar_api_token_configured=is_configured("GOOGLE_CALENDAR_API_TOKEN"),
         notion_client_id_configured=is_configured("NOTION_CLIENT_ID"),
         notion_client_secret_configured=is_configured("NOTION_CLIENT_SECRET"),
@@ -815,15 +820,7 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_API_TOKEN": credentials.notion_api_token_configured,
                 "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
                 "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
-          
-        notion_calendar_events_creation=_build_pipeline_status(
-            {
-                "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
-                "GEMINI_API_KEY": credentials.gemini_api_key_configured,
-                "NOTION_API_TOKEN": credentials.notion_api_token_configured,
-                "NOTION_CALENDAR_DATABASE_ID": credentials.notion_calendar_database_id_configured,
             },
-        ),  },
         ),
         google_calendar_due_date_events=_build_pipeline_status(
             {

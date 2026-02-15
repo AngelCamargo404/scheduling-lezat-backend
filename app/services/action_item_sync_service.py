@@ -7,7 +7,6 @@ from typing import Any
 from app.core.config import Settings
 from app.services.gemini_action_items_client import GeminiActionItemsClient, GeminiActionItemsError
 from app.services.google_calendar_client import GoogleCalendarClient, GoogleCalendarError
-from app.services.notion_calendar_client import NotionCalendarClient, NotionCalendarError
 from app.services.notion_kanban_client import NotionKanbanClient, NotionKanbanError
 from app.services.outlook_calendar_client import OutlookCalendarClient, OutlookCalendarError
 
@@ -18,16 +17,12 @@ class ActionItemSyncService:
         settings: Settings,
         gemini_client: GeminiActionItemsClient | None = None,
         notion_client: NotionKanbanClient | None = None,
-        notion_calendar_client: NotionCalendarClient | None = None,
         google_calendar_client: GoogleCalendarClient | None = None,
         outlook_calendar_client: OutlookCalendarClient | None = None,
     ) -> None:
         self.settings = settings
         self.gemini_client = gemini_client or self._create_gemini_client()
         self.notion_client = notion_client or self._create_notion_client()
-        self.notion_calendar_client = (
-            notion_calendar_client or self._create_notion_calendar_client()
-        )
         self.google_calendar_client = (
             google_calendar_client or self._create_google_calendar_client()
         )
@@ -113,22 +108,18 @@ class ActionItemSyncService:
         created_count = 0
         google_calendar_created_count = 0
         outlook_calendar_created_count = 0
-        notion_calendar_created_count = 0
         serialized_items: list[dict[str, Any]] = []
         for action_item in action_items:
             serialized_item = action_item.to_dict()
             serialized_item["notion_page_id"] = None
             serialized_item["google_calendar_event_id"] = None
             serialized_item["outlook_calendar_event_id"] = None
-            serialized_item["notion_calendar_event_id"] = None
             serialized_item["status"] = "pending"
             serialized_item["error"] = None
             serialized_item["google_calendar_status"] = "not_required_no_due_date"
             serialized_item["google_calendar_error"] = None
             serialized_item["outlook_calendar_status"] = "not_required_no_due_date"
             serialized_item["outlook_calendar_error"] = None
-            serialized_item["notion_calendar_status"] = "not_required_no_due_date"
-            serialized_item["notion_calendar_error"] = None
             try:
                 page_id = self.notion_client.create_kanban_task(
                     item=action_item,
@@ -186,29 +177,6 @@ class ActionItemSyncService:
                         serialized_item["outlook_calendar_event_id"] = event_id
                         outlook_calendar_created_count += 1
 
-                # Notion Calendar Sync (with duplicate prevention)
-                if not self.notion_calendar_client:
-                     serialized_item["notion_calendar_status"] = "skipped_missing_configuration"
-                     serialized_item["notion_calendar_error"] = (
-                         "NOTION_CALENDAR_DATABASE_ID is missing."
-                     )
-                elif google_calendar_success:
-                     serialized_item["notion_calendar_status"] = "skipped_duplicate_prevention"
-                     serialized_item["notion_calendar_error"] = None
-                else:
-                    try:
-                        event_id = self.notion_calendar_client.create_event(
-                            item=action_item,
-                            meeting_id=meeting_id,
-                        )
-                    except NotionCalendarError as exc:
-                        serialized_item["notion_calendar_status"] = "failed"
-                        serialized_item["notion_calendar_error"] = str(exc)
-                    else:
-                        serialized_item["notion_calendar_status"] = "created"
-                        serialized_item["notion_calendar_event_id"] = event_id
-                        notion_calendar_created_count += 1
-
             serialized_items.append(serialized_item)
 
         status = "completed"
@@ -230,11 +198,6 @@ class ActionItemSyncService:
             serialized_items=serialized_items,
             created_count=outlook_calendar_created_count,
         )
-        notion_calendar_status, notion_calendar_error = self._summarize_notion_calendar_sync(
-            action_items=action_items,
-            serialized_items=serialized_items,
-            created_count=notion_calendar_created_count,
-        )
 
         if calendar_status in {"failed_sync", "completed_with_errors"} and status == "completed":
             status = "completed_with_errors"
@@ -245,12 +208,6 @@ class ActionItemSyncService:
         ):
             status = "completed_with_errors"
             error = "Some action items could not be synced to Outlook Calendar."
-        if (
-            notion_calendar_status in {"failed_sync", "completed_with_errors"}
-            and status == "completed"
-        ):
-            status = "completed_with_errors"
-            error = "Some action items could not be synced to Notion Calendar."
 
         return self._build_result(
             status=status,
@@ -262,9 +219,6 @@ class ActionItemSyncService:
             outlook_calendar_status=outlook_calendar_status,
             outlook_calendar_created_count=outlook_calendar_created_count,
             outlook_calendar_error=outlook_calendar_error,
-            notion_calendar_status=notion_calendar_status,
-            notion_calendar_created_count=notion_calendar_created_count,
-            notion_calendar_error=notion_calendar_error,
             items=serialized_items,
             error=error,
         )
@@ -296,22 +250,6 @@ class ActionItemSyncService:
             assignee_property=self.settings.notion_task_assignee_property,
             status_property=self.settings.notion_task_status_property,
             due_date_property=self.settings.notion_task_due_date_property,
-            details_property=self.settings.notion_task_details_property,
-            meeting_id_property=self.settings.notion_task_meeting_id_property,
-        )
-
-    def _create_notion_calendar_client(self) -> NotionCalendarClient | None:
-        api_token = self.settings.notion_api_token.strip()
-        database_id = self.settings.notion_calendar_database_id.strip()
-        if not api_token or not database_id:
-            return None
-        return NotionCalendarClient(
-            api_token=api_token,
-            database_id=database_id,
-            timeout_seconds=self.settings.notion_api_timeout_seconds,
-            api_version=self.settings.notion_api_version,
-            title_property=self.settings.notion_task_title_property,
-            date_property=self.settings.notion_task_due_date_property,
             details_property=self.settings.notion_task_details_property,
             meeting_id_property=self.settings.notion_task_meeting_id_property,
         )
@@ -391,36 +329,6 @@ class ActionItemSyncService:
             return "completed_with_errors", "Some due-date action items could not be synced."
         return "completed", None
 
-    def _summarize_notion_calendar_sync(
-        self,
-        *,
-        action_items: list[Any],
-        serialized_items: list[dict[str, Any]],
-        created_count: int,
-    ) -> tuple[str, str | None]:
-        due_date_items_count = sum(1 for item in action_items if getattr(item, "due_date", None))
-        if due_date_items_count == 0:
-            return "not_required_no_due_dates", None
-        if not self.notion_calendar_client:
-            return "skipped_missing_configuration", "NOTION_CALENDAR_DATABASE_ID is missing."
-
-        failed_count = 0
-        duplicate_prevented_count = 0
-        for item in serialized_items:
-            status = item.get("notion_calendar_status")
-            if status == "failed":
-                failed_count += 1
-            if status == "skipped_duplicate_prevention":
-                duplicate_prevented_count += 1
-
-        if created_count == 0:
-            if duplicate_prevented_count > 0:
-                 return "skipped_duplicate_prevention", None
-            return "failed_sync", "No due-date action item could be created in Notion Calendar."
-        if failed_count > 0:
-            return "completed_with_errors", "Some due-date action items could not be synced."
-        return "completed", None
-
     def _apply_test_due_date(self, action_items: list[Any]) -> list[Any]:
         raw_due_date = self.settings.action_items_test_due_date.strip()
         if not raw_due_date:
@@ -448,9 +356,6 @@ class ActionItemSyncService:
         outlook_calendar_status: str,
         outlook_calendar_created_count: int,
         outlook_calendar_error: str | None,
-        notion_calendar_status: str = "not_required_no_due_dates",
-        notion_calendar_created_count: int = 0,
-        notion_calendar_error: str | None = None,
         items: list[dict[str, Any]],
         error: str | None,
     ) -> dict[str, Any]:
@@ -464,9 +369,6 @@ class ActionItemSyncService:
             "outlook_calendar_status": outlook_calendar_status,
             "outlook_calendar_created_count": outlook_calendar_created_count,
             "outlook_calendar_error": outlook_calendar_error,
-            "notion_calendar_status": notion_calendar_status,
-            "notion_calendar_created_count": notion_calendar_created_count,
-            "notion_calendar_error": notion_calendar_error,
             "items": items,
             "error": error,
             "synced_at": datetime.now(UTC),

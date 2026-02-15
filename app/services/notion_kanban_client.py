@@ -15,7 +15,7 @@ class NotionKanbanClient:
         self,
         *,
         api_token: str,
-        database_id: str,
+        database_id: str = "",
         timeout_seconds: float = 10.0,
         api_version: str = "2022-06-28",
         todo_status_name: str = "Por hacer",
@@ -41,6 +41,40 @@ class NotionKanbanClient:
         self.api_base_url = api_base_url.rstrip("/")
         self._database_properties_cache: dict[str, dict[str, Any]] | None = None
         self._users_by_email_cache: dict[str, str] | None = None
+
+    def list_accessible_databases(self) -> list[dict[str, Any]]:
+        """
+        Lists all databases accessible by the integration token.
+        Returns a simplified list of dicts with id, title, and url.
+        """
+        body = {
+            "filter": {"value": "database", "property": "object"},
+            "sort": {"direction": "descending", "timestamp": "last_edited_time"},
+            "page_size": 100,
+        }
+        try:
+            response = self._request_json("POST", "/search", body)
+        except Exception:
+            # If search fails, we just return empty list to avoid blocking UI
+            return []
+
+        results = response.get("results", [])
+        databases = []
+        for db in results:
+            if db.get("object") != "database":
+                continue
+            
+            title_blocks = db.get("title", [])
+            title_text = "Untitled"
+            if title_blocks:
+                title_text = "".join(t.get("plain_text", "") for t in title_blocks)
+            
+            databases.append({
+                "id": db.get("id"),
+                "title": title_text,
+                "url": db.get("url"),
+            })
+        return databases
 
     def create_kanban_task(self, *, item: ActionItem, meeting_id: str | None) -> str:
         database_properties = self._get_database_properties()

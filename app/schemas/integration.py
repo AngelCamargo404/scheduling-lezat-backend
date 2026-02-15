@@ -8,7 +8,6 @@ class IntegrationCredentialStatus(BaseModel):
     gemini_api_key_configured: bool
     notion_api_token_configured: bool
     notion_tasks_database_id_configured: bool
-    notion_calendar_database_id_configured: bool
     google_calendar_api_token_configured: bool
     notion_client_id_configured: bool
     notion_client_secret_configured: bool
@@ -32,7 +31,6 @@ class IntegrationPipelinesStatus(BaseModel):
     fireflies_transcript_enrichment: IntegrationPipelineStatus
     read_ai_transcript_enrichment: IntegrationPipelineStatus
     notion_notes_creation: IntegrationPipelineStatus
-    notion_calendar_events_creation: IntegrationPipelineStatus
     google_calendar_due_date_events: IntegrationPipelineStatus
     outlook_calendar_due_date_events: IntegrationPipelineStatus
     notion_oauth_connection: IntegrationPipelineStatus

@@ -15,7 +15,7 @@ class NotionCalendarClient:
         self,
         *,
         api_token: str,
-        database_id: str,
+        database_id: str = "",
         timeout_seconds: float = 10.0,
         api_version: str = "2022-06-28",
         title_property: str = "Name",
@@ -223,6 +223,44 @@ class NotionCalendarClient:
                 },
             )
         return blocks
+
+    def list_accessible_databases(self) -> list[dict[str, Any]]:
+        payload = {
+            "filter": {
+                "value": "database",
+                "property": "object",
+            },
+            "page_size": 100,
+        }
+        res = self._request_json("POST", "/search", payload=payload)
+        results = res.get("results")
+        if not isinstance(results, list):
+            return []
+
+        databases: list[dict[str, Any]] = []
+        for db in results:
+            if not isinstance(db, dict):
+                continue
+
+            db_id = db.get("id")
+            if not isinstance(db_id, str):
+                continue
+
+            title_prop = db.get("title", [])
+            title_text = "Untitled"
+            if isinstance(title_prop, list) and len(title_prop) > 0:
+                first_t = title_prop[0]
+                if isinstance(first_t, dict):
+                    title_text = first_t.get("plain_text", "Untitled")
+
+            databases.append(
+                {
+                    "id": db_id,
+                    "title": title_text,
+                    "url": db.get("url"),
+                }
+            )
+        return databases
 
     def _truncate(self, text: str, length: int) -> str:
         if len(text) <= length:
