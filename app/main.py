@@ -42,6 +42,16 @@ def create_application() -> FastAPI:
     )
 
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    @app.get("/")
+    def root() -> dict[str, str]:
+        return {
+            "status": "ok",
+            "service": settings.app_name,
+            "health": f"{settings.api_prefix}/health",
+            "docs": f"{settings.api_prefix}/docs",
+        }
+
     app.add_event_handler("startup", _initialize_auth_defaults)
 
     return app
@@ -49,7 +59,10 @@ def create_application() -> FastAPI:
 
 def _initialize_auth_defaults() -> None:
     logger.info("Initializing auth defaults")
-    AuthService().ensure_default_admin_user()
+    try:
+        AuthService().ensure_default_admin_user()
+    except Exception:
+        logger.exception("Failed to initialize auth defaults")
 
 
 app = create_application()
