@@ -1,4 +1,5 @@
 import hashlib
+import json
 import hmac
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -135,11 +136,52 @@ class TranscriptionService:
             payload,
             paths=("event", "event_type", "eventType", "type"),
         )
+        ingestion_key = self._build_ingestion_key(
+            provider=provider,
+            payload=payload,
+        )
+
+        if ingestion_key:
+            existing_record = self._get_record_by_ingestion_key(ingestion_key)
+            if existing_record:
+                existing_action_items_sync = self._to_mapping(existing_record.get("action_items_sync"))
+                existing_status = (
+                    self._to_text(existing_action_items_sync.get("status"))
+                    if existing_action_items_sync
+                    else None
+                )
+                return TranscriptionWebhookResponse(
+                    provider=provider,
+                    event_type=self._to_text(existing_record.get("event_type")) or event_type,
+                    meeting_id=self._to_text(existing_record.get("meeting_id")) or meeting_id,
+                    client_reference_id=self._to_text(existing_record.get("client_reference_id"))
+                    or client_reference_id,
+                    transcript_id=self._to_text(existing_record.get("transcript_id")) or transcript_id,
+                    meeting_platform=self._to_text(existing_record.get("meeting_platform"))
+                    or meeting_platform,
+                    is_google_meet=bool(existing_record.get("is_google_meet", False)),
+                    transcript_text_available=bool(
+                        existing_record.get("transcript_text_available", False)
+                    ),
+                    enrichment_status=self._to_text(existing_record.get("enrichment_status"))
+                    or "skipped_duplicate",
+                    enrichment_error=self._to_text(existing_record.get("enrichment_error")),
+                    action_items_sync_status=existing_status,
+                    action_items_created_count=self._to_int(
+                        existing_action_items_sync.get("created_count"),
+                    )
+                    if existing_action_items_sync
+                    else None,
+                    stored_record_id=self._to_text(existing_record.get("_id")),
+                    received_at=self._to_datetime(existing_record.get("received_at")),
+                )
+
         transcript_text = self._extract_transcript_text(payload)
         enrichment_status = "not_required"
         enrichment_error: str | None = None
         fireflies_transcript: dict[str, Any] | None = None
         read_ai_transcript: dict[str, Any] | None = None
+        enrichment_fireflies_client = self._resolve_fireflies_client_for_payload(payload)
 
         if provider == TranscriptionProvider.fireflies:
             (
@@ -154,6 +196,7 @@ class TranscriptionService:
                 transcript_id=transcript_id,
                 transcript_text=transcript_text,
                 meeting_url=meeting_url,
+                fireflies_client=enrichment_fireflies_client,
             )
         elif provider == TranscriptionProvider.read_ai:
              (
@@ -225,6 +268,7 @@ class TranscriptionService:
             is_google_meet=is_google_meet,
             transcript_text_available=transcript_text is not None,
             transcript_text=transcript_text,
+            ingestion_key=ingestion_key,
             enrichment_status=enrichment_status,
             enrichment_error=enrichment_error,
             action_items_sync=action_items_sync,
@@ -460,6 +504,26 @@ class TranscriptionService:
                 detail="Unable to persist transcription.",
             ) from exc
 
+    def _get_record_by_ingestion_key(self, ingestion_key: str) -> Mapping[str, Any] | None:
+        try:
+            return self.store.get_by_ingestion_key(ingestion_key)
+        except Exception:
+            return None
+
+    def _build_ingestion_key(
+        self,
+        *,
+        provider: TranscriptionProvider,
+        payload: Mapping[str, Any],
+    ) -> str | None:
+        try:
+            normalized_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            normalized_payload = json.dumps(dict(payload), sort_keys=True, default=str)
+
+        digest = hashlib.sha256(normalized_payload.encode("utf-8")).hexdigest()
+        return f"{provider.value}:{digest}"
+
     def _get_latest_record_by_meeting_id(self, meeting_id: str) -> Mapping[str, Any]:
         try:
             record = self.store.get_latest_by_meeting_id(meeting_id)
@@ -482,6 +546,7 @@ class TranscriptionService:
         transcript_id: str | None,
         transcript_text: str | None,
         meeting_url: str | None,
+        fireflies_client: FirefliesApiClient | None = None,
     ) -> tuple[str | None, str | None, str | None, dict[str, Any] | None, str, str | None]:
         if not meeting_id:
             return (
@@ -493,7 +558,8 @@ class TranscriptionService:
                 "Webhook payload missing meetingId.",
             )
 
-        if not self.fireflies_client:
+        active_client = fireflies_client or self.fireflies_client
+        if not active_client:
             return (
                 transcript_text,
                 transcript_id,
@@ -504,7 +570,10 @@ class TranscriptionService:
             )
 
         try:
-            fireflies_transcript = self._fetch_fireflies_transcript(meeting_id)
+            fireflies_transcript = self._fetch_fireflies_transcript(
+                meeting_id,
+                fireflies_client=active_client,
+            )
         except FirefliesApiError as exc:
             return (
                 transcript_text,
@@ -527,10 +596,15 @@ class TranscriptionService:
             None,
         )
 
-    def _fetch_fireflies_transcript(self, meeting_id: str) -> dict[str, Any]:
-        if not self.fireflies_client:
+    def _fetch_fireflies_transcript(
+        self,
+        meeting_id: str,
+        fireflies_client: FirefliesApiClient | None = None,
+    ) -> dict[str, Any]:
+        active_client = fireflies_client or self.fireflies_client
+        if not active_client:
             raise FirefliesApiError("Fireflies API client is not configured.")
-        return self.fireflies_client.fetch_transcript_by_meeting_id(meeting_id)
+        return active_client.fetch_transcript_by_meeting_id(meeting_id)
 
     def _create_fireflies_client(self) -> FirefliesApiClient | None:
         if not self.settings.fireflies_api_key:
@@ -540,6 +614,30 @@ class TranscriptionService:
             api_key=self.settings.fireflies_api_key,
             timeout_seconds=self.settings.fireflies_api_timeout_seconds,
             user_agent=self.settings.fireflies_api_user_agent,
+        )
+
+    def _resolve_fireflies_client_for_payload(
+        self,
+        payload: Mapping[str, Any],
+    ) -> FirefliesApiClient | None:
+        participant_emails = sanitize_action_item_participants(
+            self._extract_participant_emails_from_payload(payload),
+        )
+        if not participant_emails:
+            return self.fireflies_client
+
+        effective_settings = self._resolve_settings_for_participants(participant_emails)
+        if not effective_settings.fireflies_api_key:
+            return self.fireflies_client
+
+        if effective_settings.fireflies_api_key == self.settings.fireflies_api_key:
+            return self.fireflies_client
+
+        return FirefliesApiClient(
+            api_url=effective_settings.fireflies_api_url,
+            api_key=effective_settings.fireflies_api_key,
+            timeout_seconds=effective_settings.fireflies_api_timeout_seconds,
+            user_agent=effective_settings.fireflies_api_user_agent,
         )
 
     def _enrich_read_ai_transcript(
@@ -762,6 +860,22 @@ class TranscriptionService:
         effective_settings = self.settings
         sync_service = self.action_item_sync_service
         if resolve_user_settings and not self._has_custom_action_item_sync_service:
+            forced_settings_error = self._validate_forced_user_settings()
+            if forced_settings_error:
+                return {
+                    "status": "skipped_missing_forced_user_settings",
+                    "extracted_count": 0,
+                    "created_count": 0,
+                    "google_calendar_status": "not_required_missing_forced_user_settings",
+                    "google_calendar_created_count": 0,
+                    "google_calendar_error": None,
+                    "outlook_calendar_status": "not_required_missing_forced_user_settings",
+                    "outlook_calendar_created_count": 0,
+                    "outlook_calendar_error": None,
+                    "items": [],
+                    "error": forced_settings_error,
+                    "synced_at": datetime.now(UTC),
+                }
             effective_settings = self._resolve_settings_for_participants(sanitized_participants)
             sync_service = ActionItemSyncService(effective_settings)
         if not effective_settings.transcription_autosync_enabled:
@@ -800,17 +914,25 @@ class TranscriptionService:
             }
 
     def _resolve_settings_for_participants(self, participant_emails: list[str]) -> Settings:
-        if not participant_emails:
-            return self.settings
+        normalized_participants = sanitize_action_item_participants(participant_emails)
         user_store = self._get_user_store()
         if not user_store:
+            return self.settings
+
+        forced_user_id = self.settings.force_user_settings_user_id.strip()
+        if forced_user_id:
+            forced_user_values = user_store.get_user_settings_values(forced_user_id)
+            if forced_user_values:
+                return self._merge_settings_with_user_values(forced_user_values)
+
+        if not normalized_participants:
             return self.settings
 
         seen_user_ids: set[str] = set()
         best_user_values: dict[str, str] | None = None
         best_score = 0
 
-        for participant_email in participant_emails:
+        for participant_email in normalized_participants:
             user_record = user_store.get_user_by_email(participant_email)
             if not user_record:
                 continue
@@ -830,9 +952,51 @@ class TranscriptionService:
             return self.settings
         return self._merge_settings_with_user_values(best_user_values)
 
+    def _validate_forced_user_settings(self) -> str | None:
+        forced_user_id = self.settings.force_user_settings_user_id.strip()
+        if not forced_user_id:
+            return None
+
+        user_store = self._get_user_store()
+        if not user_store:
+            return "FORCE_USER_SETTINGS_USER_ID is configured but user store is unavailable."
+
+        forced_user = user_store.get_user_by_id(forced_user_id)
+        if not forced_user:
+            return (
+                "FORCE_USER_SETTINGS_USER_ID is configured but user was not found: "
+                f"{forced_user_id}."
+            )
+
+        forced_values = user_store.get_user_settings_values(forced_user_id)
+        effective_settings = self._merge_settings_with_user_values(forced_values)
+
+        # TODO: Migrar/completar la configuración del usuario forzado para no depender
+        # del fallback a valores base (.env) y poder desactivar esta compatibilidad.
+        required_fields = (
+            ("FIREFLIES_API_KEY", effective_settings.fireflies_api_key),
+            ("NOTION_API_TOKEN", effective_settings.notion_api_token),
+            ("NOTION_TASKS_DATABASE_ID", effective_settings.notion_tasks_database_id),
+            ("NOTION_TASK_STATUS_PROPERTY", effective_settings.notion_task_status_property),
+        )
+        missing_required = [
+            env_var
+            for env_var, raw_value in required_fields
+            if not str(raw_value).strip()
+        ]
+        if missing_required:
+            missing_list = ", ".join(missing_required)
+            return (
+                "FORCE_USER_SETTINGS_USER_ID is configured but missing required settings: "
+                f"{missing_list}."
+            )
+        return None
+
     def _score_user_settings(self, user_values: Mapping[str, str]) -> int:
         score = 0
         for env_var in (
+            "FIREFLIES_API_KEY",
+            "READ_AI_API_KEY",
             "NOTION_API_TOKEN",
             "NOTION_TASKS_DATABASE_ID",
             "GOOGLE_CALENDAR_API_TOKEN",
@@ -849,6 +1013,9 @@ class TranscriptionService:
         # By product rule, autosync starts enabled unless the user explicitly disables it.
         overrides: dict[str, Any] = {"transcription_autosync_enabled": True}
         for env_var, raw_value in user_values.items():
+            # GEMINI_API_KEY must always come from environment-level settings (.env).
+            if env_var == "GEMINI_API_KEY":
+                continue
             attr_name = env_var.lower()
             if not hasattr(self.settings, attr_name):
                 continue

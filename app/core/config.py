@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     mongodb_user_settings_collection: str = "user_integration_settings"
     mongodb_connect_timeout_ms: int = 2000
     user_data_store: str = "mongodb"
+    force_user_settings_user_id: str = "6990d16c6ed39a654990a2df"
     auth_secret_key: str = "change-me-in-production"
     auth_token_ttl_minutes: int = 60 * 12
     default_admin_email: str = "admin"
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     notion_task_due_date_property: str = "Due date"
     notion_task_details_property: str = "Details"
     notion_task_meeting_id_property: str = "Meeting ID"
+    action_items_test_mode_enabled: bool = False
     action_items_test_due_date: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""

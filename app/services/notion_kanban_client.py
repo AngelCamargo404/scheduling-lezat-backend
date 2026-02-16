@@ -76,6 +76,14 @@ class NotionKanbanClient:
             })
         return databases
 
+    def list_database_properties(self) -> dict[str, dict[str, Any]]:
+        """
+        Returns normalized property metadata for the configured database.
+        """
+        if not self.database_id.strip():
+            return {}
+        return self._get_database_properties()
+
     def create_kanban_task(self, *, item: ActionItem, meeting_id: str | None) -> str:
         database_properties = self._get_database_properties()
         task_properties = self._build_task_properties(

@@ -205,6 +205,16 @@ FIELD_DEFINITIONS = (
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
+        env_var="NOTION_KANBAN_TODO_STATUS",
+        label="To-do Status Option",
+        description=(
+            "Nombre exacto de la opcion de estado/select usada al crear tareas "
+            "(por ejemplo: Por hacer, Not started)."
+        ),
+        group="notion_sync",
+        required_for=("notion_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
         env_var="GOOGLE_CALENDAR_API_TOKEN",
         label="Google Calendar API Token",
         description="Access token para crear eventos por due_date.",
@@ -497,6 +507,82 @@ def get_notion_accessible_databases(
         return client.list_accessible_databases()
     except Exception:
         return []
+
+
+@router.get("/notion/databases/{database_id}/properties")
+def get_notion_database_properties(
+    database_id: str,
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> dict:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("NOTION_API_TOKEN", "")
+    if not token.strip() or not database_id.strip():
+        return {}
+
+    client = NotionKanbanClient(api_token=token, database_id=database_id)
+    try:
+        return client.list_database_properties()
+    except Exception:
+        return {}
+
+
+@router.get("/notion/databases/{database_id}/status-options")
+def get_notion_database_status_options(
+    database_id: str,
+    status_property: str = Query(default=""),
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> dict[str, object]:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("NOTION_API_TOKEN", "")
+    if not token.strip() or not database_id.strip():
+        return {
+            "selected_property": status_property.strip() or None,
+            "property_type": None,
+            "options": [],
+            "available_status_properties": [],
+        }
+
+    client = NotionKanbanClient(api_token=token, database_id=database_id)
+    try:
+        properties = client.list_database_properties()
+    except Exception:
+        return {
+            "selected_property": status_property.strip() or None,
+            "property_type": None,
+            "options": [],
+            "available_status_properties": [],
+        }
+
+    available_status_properties: list[str] = []
+    for property_name, property_payload in properties.items():
+        if not isinstance(property_name, str) or not isinstance(property_payload, dict):
+            continue
+        property_type = str(property_payload.get("type", "")).strip().lower()
+        if property_type in {"status", "select"}:
+            available_status_properties.append(property_name)
+
+    selected_property = status_property.strip()
+    if not selected_property:
+        selected_property = available_status_properties[0] if available_status_properties else ""
+
+    selected_payload = properties.get(selected_property, {}) if selected_property else {}
+    selected_type = str(selected_payload.get("type", "")).strip().lower()
+    selected_options: list[str] = []
+    if selected_type == "status":
+        selected_options = _extract_notion_option_names(
+            selected_payload.get("status", {}).get("options"),
+        )
+    elif selected_type == "select":
+        selected_options = _extract_notion_option_names(
+            selected_payload.get("select", {}).get("options"),
+        )
+
+    return {
+        "selected_property": selected_property or None,
+        "property_type": selected_type or None,
+        "options": selected_options,
+        "available_status_properties": available_status_properties,
+    }
 
 
 @router.get("/google-calendar/connect")
@@ -820,6 +906,7 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_API_TOKEN": credentials.notion_api_token_configured,
                 "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
                 "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
+                "NOTION_KANBAN_TODO_STATUS": is_configured("NOTION_KANBAN_TODO_STATUS"),
             },
         ),
         google_calendar_due_date_events=_build_pipeline_status(
@@ -829,6 +916,7 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_API_TOKEN": credentials.notion_api_token_configured,
                 "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
                 "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
+                "NOTION_KANBAN_TODO_STATUS": is_configured("NOTION_KANBAN_TODO_STATUS"),
                 "GOOGLE_CALENDAR_API_TOKEN": credentials.google_calendar_api_token_configured,
             },
         ),
@@ -839,6 +927,7 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_API_TOKEN": credentials.notion_api_token_configured,
                 "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
                 "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
+                "NOTION_KANBAN_TODO_STATUS": is_configured("NOTION_KANBAN_TODO_STATUS"),
                 "OUTLOOK_CALENDAR_API_TOKEN": credentials.outlook_calendar_api_token_configured,
             },
         ),
@@ -1072,6 +1161,22 @@ def _normalize_boolean_text(raw_value: str) -> str:
 def _build_pipeline_status(requirements: dict[str, bool]) -> IntegrationPipelineStatus:
     missing_env_vars = [env_var for env_var, configured in requirements.items() if not configured]
     return IntegrationPipelineStatus(ready=not missing_env_vars, missing_env_vars=missing_env_vars)
+
+
+def _extract_notion_option_names(raw_options: object) -> list[str]:
+    if not isinstance(raw_options, list):
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_option in raw_options:
+        if not isinstance(raw_option, dict):
+            continue
+        name = str(raw_option.get("name", "")).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        values.append(name)
+    return values
 
 
 def _resolve_current_user_for_oauth(

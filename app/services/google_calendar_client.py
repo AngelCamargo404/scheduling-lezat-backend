@@ -1,5 +1,5 @@
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib import error, parse, request
 
@@ -176,10 +176,25 @@ class GoogleCalendarClient:
             self.refresh_token = refreshed_refresh_token.strip()
 
     def _parse_date(self, raw_date: str) -> date:
+        cleaned = raw_date.strip()
         try:
-            return date.fromisoformat(raw_date)
+            return date.fromisoformat(cleaned)
         except ValueError as exc:
-            raise GoogleCalendarError("Action item due_date is not a valid ISO date.") from exc
+            # Accept datetime-like ISO strings (e.g. 2026-02-20T00:00:00Z)
+            normalized = cleaned.replace("Z", "+00:00")
+            try:
+                return datetime.fromisoformat(normalized).date()
+            except ValueError:
+                pass
+
+            # Accept common explicit date formats as compatibility fallback.
+            for fmt in ("%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(cleaned, fmt).date()
+                except ValueError:
+                    continue
+
+            raise GoogleCalendarError("Action item due_date is not a valid date format.") from exc
 
     def _build_description(self, *, item: ActionItem, meeting_id: str | None) -> str:
         lines: list[str] = []

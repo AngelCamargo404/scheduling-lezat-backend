@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.services.transcription_service import TranscriptionService
 from app.services.user_store import create_user_store
 
 router = APIRouter(prefix="/transcriptions", tags=["transcriptions"])
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -29,6 +31,11 @@ async def receive_fireflies_webhook(
     request: Request,
 ) -> TranscriptionWebhookResponse:
     payload, raw_body = await _load_payload_and_raw_body(request)
+    logger.info(
+        "Webhook received provider=fireflies path=%s has_signature=%s",
+        str(request.url.path),
+        bool(request.headers.get("x-hub-signature")),
+    )
     return _process_webhook(
         provider=TranscriptionProvider.fireflies,
         payload=payload,
@@ -47,6 +54,7 @@ def receive_read_ai_webhook(
     payload: dict[str, Any],
     request: Request,
 ) -> TranscriptionWebhookResponse:
+    logger.info("Webhook received provider=read_ai path=%s", str(request.url.path))
     return _process_webhook(
         provider=TranscriptionProvider.read_ai,
         payload=payload,
@@ -107,14 +115,40 @@ def _process_webhook(
     settings = get_settings()
     service = TranscriptionService(settings)
     shared_secret = _extract_shared_secret(request)
+    try:
+        response = service.process_webhook(
+            provider=provider,
+            payload=payload,
+            shared_secret=shared_secret,
+            raw_body=raw_body,
+            signature=signature,
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "Webhook rejected provider=%s path=%s status_code=%s detail=%s",
+            provider.value,
+            str(request.url.path),
+            exc.status_code,
+            exc.detail,
+        )
+        raise
+    except Exception:
+        logger.exception(
+            "Webhook processing failed provider=%s path=%s",
+            provider.value,
+            str(request.url.path),
+        )
+        raise
 
-    return service.process_webhook(
-        provider=provider,
-        payload=payload,
-        shared_secret=shared_secret,
-        raw_body=raw_body,
-        signature=signature,
+    logger.info(
+        "Webhook processed provider=%s path=%s meeting_id=%s stored_record_id=%s enrichment_status=%s",
+        provider.value,
+        str(request.url.path),
+        response.meeting_id,
+        response.stored_record_id,
+        response.enrichment_status,
     )
+    return response
 
 
 def _extract_shared_secret(request: Request) -> str | None:
@@ -165,6 +199,8 @@ def _build_effective_settings_for_user(current_user: CurrentUserResponse) -> Set
 
     overrides: dict[str, Any] = {}
     for env_var, raw_value in user_values.items():
+        if env_var == "GEMINI_API_KEY":
+            continue
         attr_name = env_var.lower()
         if not hasattr(base_settings, attr_name):
             continue

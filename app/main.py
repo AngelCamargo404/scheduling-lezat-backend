@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -6,7 +8,21 @@ from app.core.config import get_settings
 from app.services.auth_service import AuthService
 
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+
 def create_application() -> FastAPI:
+    _configure_logging()
     settings = get_settings()
 
     app = FastAPI(
@@ -32,6 +48,7 @@ def create_application() -> FastAPI:
 
 
 def _initialize_auth_defaults() -> None:
+    logger.info("Initializing auth defaults")
     AuthService().ensure_default_admin_user()
 
 

@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from app.core.config import Settings
+from app.services.action_item_models import ActionItem
 from app.services.gemini_action_items_client import GeminiActionItemsClient, GeminiActionItemsError
 from app.services.google_calendar_client import GoogleCalendarClient, GoogleCalendarError
 from app.services.notion_kanban_client import NotionKanbanClient, NotionKanbanError
@@ -52,7 +53,28 @@ class ActionItemSyncService:
                 items=[],
                 error=None,
             )
-        if not self.gemini_client or not self.notion_client:
+        if self.settings.action_items_test_mode_enabled:
+            if not self.notion_client:
+                return self._build_result(
+                    status="skipped_missing_configuration",
+                    extracted_count=0,
+                    created_count=0,
+                    google_calendar_status="not_required_no_due_dates",
+                    google_calendar_created_count=0,
+                    google_calendar_error=None,
+                    outlook_calendar_status="not_required_no_due_dates",
+                    outlook_calendar_created_count=0,
+                    outlook_calendar_error=None,
+                    items=[],
+                    error="NOTION_API_TOKEN or NOTION_TASKS_DATABASE_ID is missing.",
+                )
+            action_items = self._build_test_action_items(
+                meeting_id=meeting_id,
+                transcript_text=transcript_text,
+                transcript_sentences=transcript_sentences,
+                participant_emails=participant_emails,
+            )
+        elif not self.gemini_client or not self.notion_client:
             return self._build_result(
                 status="skipped_missing_configuration",
                 extracted_count=0,
@@ -67,27 +89,28 @@ class ActionItemSyncService:
                 error="GEMINI_API_KEY, NOTION_API_TOKEN or NOTION_TASKS_DATABASE_ID is missing.",
             )
 
-        try:
-            action_items = self.gemini_client.extract_action_items(
-                meeting_id=meeting_id,
-                transcript_text=transcript_text,
-                transcript_sentences=transcript_sentences,
-                participant_emails=participant_emails,
-            )
-        except GeminiActionItemsError as exc:
-            return self._build_result(
-                status="failed_analysis",
-                extracted_count=0,
-                created_count=0,
-                google_calendar_status="not_required_no_due_dates",
-                google_calendar_created_count=0,
-                google_calendar_error=None,
-                outlook_calendar_status="not_required_no_due_dates",
-                outlook_calendar_created_count=0,
-                outlook_calendar_error=None,
-                items=[],
-                error=str(exc),
-            )
+        if not self.settings.action_items_test_mode_enabled:
+            try:
+                action_items = self.gemini_client.extract_action_items(
+                    meeting_id=meeting_id,
+                    transcript_text=transcript_text,
+                    transcript_sentences=transcript_sentences,
+                    participant_emails=participant_emails,
+                )
+            except GeminiActionItemsError as exc:
+                return self._build_result(
+                    status="failed_analysis",
+                    extracted_count=0,
+                    created_count=0,
+                    google_calendar_status="not_required_no_due_dates",
+                    google_calendar_created_count=0,
+                    google_calendar_error=None,
+                    outlook_calendar_status="not_required_no_due_dates",
+                    outlook_calendar_created_count=0,
+                    outlook_calendar_error=None,
+                    items=[],
+                    error=str(exc),
+                )
 
         if not action_items:
             return self._build_result(
@@ -222,6 +245,43 @@ class ActionItemSyncService:
             items=serialized_items,
             error=error,
         )
+
+    def _build_test_action_items(
+        self,
+        *,
+        meeting_id: str | None,
+        transcript_text: str,
+        transcript_sentences: list[dict[str, Any]],
+        participant_emails: list[str],
+    ) -> list[ActionItem]:
+        assignee_email = participant_emails[0] if participant_emails else None
+        source_sentence = None
+        for sentence in transcript_sentences:
+            if not isinstance(sentence, Mapping):
+                continue
+            raw_text = sentence.get("text")
+            if not isinstance(raw_text, str):
+                continue
+            cleaned = raw_text.strip()
+            if cleaned:
+                source_sentence = cleaned
+                break
+
+        context_meeting_id = (meeting_id or "sin-meeting-id").strip() or "sin-meeting-id"
+        summary = transcript_text.strip().replace("\n", " ")
+        if len(summary) > 240:
+            summary = f"{summary[:237]}..."
+
+        return [
+            ActionItem(
+                title=f"[TEST] Revisar acuerdos - {context_meeting_id}",
+                assignee_email=assignee_email,
+                assignee_name=None,
+                due_date=None,
+                details=f"Tarea sintetica para validar sync a Notion. Contexto: {summary}",
+                source_sentence=source_sentence,
+            ),
+        ]
 
     def _create_gemini_client(self) -> GeminiActionItemsClient | None:
         if not self.settings.gemini_api_key.strip():
