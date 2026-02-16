@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     allowed_origins: Annotated[list[str], NoDecode] = [
         "http://localhost:3000",
+        "https://abundant-balance-production-9587.up.railway.app",
         "http://127.0.0.1:3000",
     ]
     fireflies_webhook_secret: str = ""
@@ -41,11 +42,11 @@ class Settings(BaseSettings):
     default_admin_full_name: str = "Administrator"
     auth_google_client_id: str = ""
     auth_google_client_secret: str = ""
-    auth_google_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
+    auth_google_redirect_uri: str = "https://scheduling-lezat-backend-production.up.railway.app/api/auth/google/callback"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3-flash-preview"
     gemini_api_timeout_seconds: float = 20.0
-    frontend_base_url: str = "http://localhost:3000"
+    frontend_base_url: str = "https://abundant-balance-production-9587.up.railway.app"
     notion_api_token: str = ""
     notion_tasks_database_id: str = ""
     notion_api_timeout_seconds: float = 10.0
@@ -61,11 +62,11 @@ class Settings(BaseSettings):
     action_items_test_due_date: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
-    notion_redirect_uri: str = "http://localhost:8000/api/integrations/notion/callback"
+    notion_redirect_uri: str = "https://scheduling-lezat-backend-production.up.railway.app/api/integrations/notion/callback"
     google_calendar_client_id: str = ""
     google_calendar_client_secret: str = ""
     google_calendar_redirect_uri: str = (
-        "http://localhost:8000/api/integrations/google-calendar/callback"
+        "https://scheduling-lezat-backend-production.up.railway.app/api/integrations/google-calendar/callback"
     )
     google_calendar_api_token: str = ""
     google_calendar_refresh_token: str = ""
@@ -75,7 +76,7 @@ class Settings(BaseSettings):
     outlook_client_id: str = ""
     outlook_client_secret: str = ""
     outlook_tenant_id: str = "common"
-    outlook_redirect_uri: str = "http://localhost:8000/api/integrations/outlook-calendar/callback"
+    outlook_redirect_uri: str = "https://scheduling-lezat-backend-production.up.railway.app/api/integrations/outlook-calendar/callback"
     outlook_calendar_api_token: str = ""
     outlook_calendar_event_timezone: str = "UTC"
 
