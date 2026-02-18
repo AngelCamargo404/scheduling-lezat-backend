@@ -130,6 +130,113 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
     assert data["stored_record_id"]
 
 
+def test_fireflies_webhook_with_user_id_uses_user_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    user = user_store.create_user(
+        email="webhook.fireflies@example.com",
+        full_name="Webhook Fireflies",
+        password_hash="hashed",
+        role="user",
+    )
+    user_store.upsert_user_settings_values(
+        str(user["_id"]),
+        {"FIREFLIES_API_KEY": "user-fireflies-key"},
+    )
+
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        fireflies_client: object | None = None,
+    ) -> dict[str, object]:
+        assert meeting_id == "meeting-fireflies-user-1"
+        assert fireflies_client is not None
+        return {
+            "id": "meeting-fireflies-user-1",
+            "meeting_link": "https://meet.google.com/abc-defg-hij",
+            "meeting_attendees": [{"email": "webhook.fireflies@example.com"}],
+            "sentences": [{"index": 0, "speaker_name": "User", "text": "Tarea 1"}],
+        }
+
+    monkeypatch.setattr(TranscriptionService, "_fetch_fireflies_transcript", fake_fetch)
+
+    payload = {
+        "meetingId": "meeting-fireflies-user-1",
+        "eventType": "Transcription completed",
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{user['_id']}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["meeting_id"] == "meeting-fireflies-user-1"
+    assert data["enrichment_status"] == "completed"
+    assert data["transcript_text_available"] is True
+
+
+def test_fireflies_webhook_with_unknown_user_id_returns_404() -> None:
+    payload = {
+        "meetingId": "meeting-fireflies-unknown-user",
+        "eventType": "Transcription completed",
+    }
+    response = client.post(
+        "/api/transcriptions/webhooks/fireflies/unknown-user-id",
+        json=payload,
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found for webhook URL."
+
+
+def test_read_ai_webhook_with_user_id_uses_user_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    user = user_store.create_user(
+        email="webhook.readai@example.com",
+        full_name="Webhook Read AI",
+        password_hash="hashed",
+        role="user",
+    )
+    user_store.upsert_user_settings_values(
+        str(user["_id"]),
+        {"READ_AI_API_KEY": "user-read-ai-key"},
+    )
+
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        read_ai_client: object | None = None,
+    ) -> dict[str, object]:
+        assert meeting_id == "meeting-read-ai-user-1"
+        assert read_ai_client is not None
+        return {
+            "participants": [{"email": "webhook.readai@example.com"}],
+            "sentences": [{"text": "Acuerdo 1"}],
+        }
+
+    monkeypatch.setattr(TranscriptionService, "_fetch_read_ai_transcript", fake_fetch)
+
+    payload = {
+        "event_type": "meeting.completed",
+        "meeting": {"external_id": "meeting-read-ai-user-1"},
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/read-ai/{user['_id']}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["meeting_id"] == "meeting-read-ai-user-1"
+    assert data["enrichment_status"] == "completed"
+    assert data["transcript_text_available"] is True
+
+
 def test_fireflies_webhook_accepts_request_even_with_invalid_webhook_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -299,12 +406,14 @@ def test_webhook_persists_action_items_sync_result(
         transcript_sentences: list[dict[str, object]],
         participant_emails: list[str],
         resolve_user_settings: bool = False,
+        user_settings_user_id: str | None = None,
     ) -> dict[str, object]:
         assert meeting_id == "meeting-action-items-1"
         assert transcript_text == "Debes enviar la propuesta hoy."
         assert transcript_sentences == []
         assert participant_emails == []
         assert resolve_user_settings is True
+        assert user_settings_user_id is None
         return {
             "status": "completed",
             "extracted_count": 1,

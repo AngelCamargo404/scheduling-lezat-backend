@@ -46,6 +46,32 @@ async def receive_fireflies_webhook(
 
 
 @router.post(
+    "/webhooks/fireflies/{user_id}",
+    response_model=TranscriptionWebhookResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def receive_fireflies_webhook_for_user(
+    user_id: str,
+    request: Request,
+) -> TranscriptionWebhookResponse:
+    payload, raw_body = await _load_payload_and_raw_body(request)
+    logger.info(
+        "Webhook received provider=fireflies path=%s user_id=%s has_signature=%s",
+        str(request.url.path),
+        user_id,
+        bool(request.headers.get("x-hub-signature")),
+    )
+    return _process_webhook(
+        provider=TranscriptionProvider.fireflies,
+        payload=payload,
+        request=request,
+        raw_body=raw_body,
+        signature=request.headers.get("x-hub-signature"),
+        user_id=user_id,
+    )
+
+
+@router.post(
     "/webhooks/read-ai",
     response_model=TranscriptionWebhookResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -59,6 +85,29 @@ def receive_read_ai_webhook(
         provider=TranscriptionProvider.read_ai,
         payload=payload,
         request=request,
+    )
+
+
+@router.post(
+    "/webhooks/read-ai/{user_id}",
+    response_model=TranscriptionWebhookResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def receive_read_ai_webhook_for_user(
+    user_id: str,
+    payload: dict[str, Any],
+    request: Request,
+) -> TranscriptionWebhookResponse:
+    logger.info(
+        "Webhook received provider=read_ai path=%s user_id=%s",
+        str(request.url.path),
+        user_id,
+    )
+    return _process_webhook(
+        provider=TranscriptionProvider.read_ai,
+        payload=payload,
+        request=request,
+        user_id=user_id,
     )
 
 
@@ -111,7 +160,10 @@ def _process_webhook(
     request: Request,
     raw_body: bytes | None = None,
     signature: str | None = None,
+    user_id: str | None = None,
 ) -> TranscriptionWebhookResponse:
+    if user_id:
+        _assert_user_exists(user_id)
     settings = get_settings()
     service = TranscriptionService(settings)
     shared_secret = _extract_shared_secret(request)
@@ -122,6 +174,7 @@ def _process_webhook(
             shared_secret=shared_secret,
             raw_body=raw_body,
             signature=signature,
+            user_settings_user_id=user_id,
         )
     except HTTPException as exc:
         logger.warning(
@@ -141,9 +194,13 @@ def _process_webhook(
         raise
 
     logger.info(
-        "Webhook processed provider=%s path=%s meeting_id=%s stored_record_id=%s enrichment_status=%s",
+        (
+            "Webhook processed provider=%s path=%s user_id=%s meeting_id=%s "
+            "stored_record_id=%s enrichment_status=%s"
+        ),
         provider.value,
         str(request.url.path),
+        user_id,
         response.meeting_id,
         response.stored_record_id,
         response.enrichment_status,
@@ -226,3 +283,19 @@ def _build_effective_settings_for_user(current_user: CurrentUserResponse) -> Set
 
     merged_payload.update(overrides)
     return Settings.model_validate(merged_payload)
+
+
+def _assert_user_exists(user_id: str) -> None:
+    normalized_user_id = user_id.strip()
+    if not normalized_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="user_id is required in webhook URL.",
+        )
+    user_store = create_user_store(get_settings())
+    if user_store.get_user_by_id(normalized_user_id):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="User not found for webhook URL.",
+    )

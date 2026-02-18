@@ -79,6 +79,7 @@ class TranscriptionService:
         shared_secret: str | None,
         raw_body: bytes | None = None,
         signature: str | None = None,
+        user_settings_user_id: str | None = None,
     ) -> TranscriptionWebhookResponse:
         self._validate_auth(
             provider=provider,
@@ -181,7 +182,14 @@ class TranscriptionService:
         enrichment_error: str | None = None
         fireflies_transcript: dict[str, Any] | None = None
         read_ai_transcript: dict[str, Any] | None = None
-        enrichment_fireflies_client = self._resolve_fireflies_client_for_payload(payload)
+        enrichment_fireflies_client = self._resolve_fireflies_client_for_payload(
+            payload,
+            user_settings_user_id=user_settings_user_id,
+        )
+        enrichment_read_ai_client = self._resolve_read_ai_client_for_payload(
+            payload,
+            user_settings_user_id=user_settings_user_id,
+        )
 
         if provider == TranscriptionProvider.fireflies:
             (
@@ -211,6 +219,7 @@ class TranscriptionService:
                 transcript_id=transcript_id,
                 transcript_text=transcript_text,
                 meeting_url=meeting_url,
+                read_ai_client=enrichment_read_ai_client,
             )
 
         transcript_sentences: list[dict[str, Any]] = []
@@ -251,6 +260,7 @@ class TranscriptionService:
             transcript_sentences=transcript_sentences,
             participant_emails=participant_emails,
             resolve_user_settings=True,
+            user_settings_user_id=user_settings_user_id,
         )
 
         if not meeting_platform:
@@ -619,14 +629,23 @@ class TranscriptionService:
     def _resolve_fireflies_client_for_payload(
         self,
         payload: Mapping[str, Any],
+        user_settings_user_id: str | None = None,
     ) -> FirefliesApiClient | None:
         participant_emails = sanitize_action_item_participants(
             self._extract_participant_emails_from_payload(payload),
         )
         if not participant_emails:
-            return self.fireflies_client
-
-        effective_settings = self._resolve_settings_for_participants(participant_emails)
+            if not user_settings_user_id:
+                return self.fireflies_client
+            effective_settings = self._resolve_settings_for_participants(
+                [],
+                user_settings_user_id=user_settings_user_id,
+            )
+        else:
+            effective_settings = self._resolve_settings_for_participants(
+                participant_emails,
+                user_settings_user_id=user_settings_user_id,
+            )
         if not effective_settings.fireflies_api_key:
             return self.fireflies_client
 
@@ -640,12 +659,46 @@ class TranscriptionService:
             user_agent=effective_settings.fireflies_api_user_agent,
         )
 
+    def _resolve_read_ai_client_for_payload(
+        self,
+        payload: Mapping[str, Any],
+        user_settings_user_id: str | None = None,
+    ) -> ReadAiApiClient | None:
+        participant_emails = sanitize_action_item_participants(
+            self._extract_participant_emails_from_payload(payload),
+        )
+        if not participant_emails:
+            if not user_settings_user_id:
+                return self.read_ai_client
+            effective_settings = self._resolve_settings_for_participants(
+                [],
+                user_settings_user_id=user_settings_user_id,
+            )
+        else:
+            effective_settings = self._resolve_settings_for_participants(
+                participant_emails,
+                user_settings_user_id=user_settings_user_id,
+            )
+        if not effective_settings.read_ai_api_key:
+            return self.read_ai_client
+
+        if effective_settings.read_ai_api_key == self.settings.read_ai_api_key:
+            return self.read_ai_client
+
+        return ReadAiApiClient(
+            api_url=effective_settings.read_ai_api_url,
+            api_key=effective_settings.read_ai_api_key,
+            timeout_seconds=effective_settings.read_ai_api_timeout_seconds,
+            user_agent=effective_settings.read_ai_api_user_agent,
+        )
+
     def _enrich_read_ai_transcript(
         self,
         meeting_id: str | None,
         transcript_id: str | None,
         transcript_text: str | None,
         meeting_url: str | None,
+        read_ai_client: ReadAiApiClient | None = None,
     ) -> tuple[str | None, str | None, str | None, dict[str, Any] | None, str, str | None]:
         if not meeting_id:
             return (
@@ -657,7 +710,8 @@ class TranscriptionService:
                 "No meeting_id provided in webhook.",
             )
 
-        if not self.read_ai_client:
+        active_client = read_ai_client or self.read_ai_client
+        if not active_client:
             return (
                 transcript_text,
                 transcript_id,
@@ -668,7 +722,10 @@ class TranscriptionService:
             )
 
         try:
-            read_ai_transcript = self._fetch_read_ai_transcript(meeting_id)
+            read_ai_transcript = self._fetch_read_ai_transcript(
+                meeting_id,
+                read_ai_client=active_client,
+            )
         except ReadAiApiError as exc:
             return (
                 transcript_text,
@@ -690,10 +747,15 @@ class TranscriptionService:
             None,
         )
 
-    def _fetch_read_ai_transcript(self, meeting_id: str) -> dict[str, Any]:
-        if not self.read_ai_client:
+    def _fetch_read_ai_transcript(
+        self,
+        meeting_id: str,
+        read_ai_client: ReadAiApiClient | None = None,
+    ) -> dict[str, Any]:
+        active_client = read_ai_client or self.read_ai_client
+        if not active_client:
              raise ReadAiApiError("Read AI API client is not configured.")
-        return self.read_ai_client.fetch_meeting_details(meeting_id)
+        return active_client.fetch_meeting_details(meeting_id)
 
     def _extract_read_ai_text(self, transcript_data: Mapping[str, Any]) -> str | None:
         explicit_text = self._extract_first_string(transcript_data, ("transcript_text", "text", "content"))
@@ -846,6 +908,7 @@ class TranscriptionService:
         transcript_sentences: list[dict[str, Any]],
         participant_emails: list[str],
         resolve_user_settings: bool = False,
+        user_settings_user_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.action_item_sync_service:
             return {
@@ -876,7 +939,15 @@ class TranscriptionService:
                     "error": forced_settings_error,
                     "synced_at": datetime.now(UTC),
                 }
-            effective_settings = self._resolve_settings_for_participants(sanitized_participants)
+            if user_settings_user_id:
+                effective_settings = self._resolve_settings_for_participants(
+                    sanitized_participants,
+                    user_settings_user_id=user_settings_user_id,
+                )
+            else:
+                effective_settings = self._resolve_settings_for_participants(
+                    sanitized_participants,
+                )
             sync_service = ActionItemSyncService(effective_settings)
         if not effective_settings.transcription_autosync_enabled:
             return {
@@ -913,11 +984,18 @@ class TranscriptionService:
                 "synced_at": datetime.now(UTC),
             }
 
-    def _resolve_settings_for_participants(self, participant_emails: list[str]) -> Settings:
+    def _resolve_settings_for_participants(
+        self,
+        participant_emails: list[str],
+        user_settings_user_id: str | None = None,
+    ) -> Settings:
         normalized_participants = sanitize_action_item_participants(participant_emails)
         user_store = self._get_user_store()
         if not user_store:
             return self.settings
+
+        if user_settings_user_id:
+            return self._resolve_settings_for_user_id(user_settings_user_id)
 
         forced_user_id = self.settings.force_user_settings_user_id.strip()
         if forced_user_id:
@@ -951,6 +1029,24 @@ class TranscriptionService:
         if not best_user_values:
             return self.settings
         return self._merge_settings_with_user_values(best_user_values)
+
+    def _resolve_settings_for_user_id(self, user_id: str) -> Settings:
+        normalized_user_id = (user_id or "").strip()
+        if not normalized_user_id:
+            return self.settings
+
+        user_store = self._get_user_store()
+        if not user_store:
+            return self.settings
+
+        user_record = user_store.get_user_by_id(normalized_user_id)
+        if not user_record:
+            return self.settings
+
+        user_values = user_store.get_user_settings_values(normalized_user_id)
+        if not user_values:
+            return self.settings
+        return self._merge_settings_with_user_values(user_values)
 
     def _validate_forced_user_settings(self) -> str | None:
         forced_user_id = self.settings.force_user_settings_user_id.strip()

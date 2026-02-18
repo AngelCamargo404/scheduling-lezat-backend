@@ -127,13 +127,17 @@ http://localhost:8000/api/health
 - `GET /api/scheduling/slots`
 - `GET /api/v1/scheduling/slots`
 - `POST /api/transcriptions/webhooks/fireflies`
+- `POST /api/transcriptions/webhooks/fireflies/{user_id}`
 - `POST /api/transcriptions/webhooks/read-ai`
+- `POST /api/transcriptions/webhooks/read-ai/{user_id}`
 - `GET /api/transcriptions/received`
 - `GET /api/transcriptions/received/by-meeting/{meeting_id}`
 - `POST /api/transcriptions/backfill/{meeting_id}`
 - `GET /api/transcriptions/received/{record_id}`
 - `POST /api/v1/transcriptions/webhooks/fireflies`
+- `POST /api/v1/transcriptions/webhooks/fireflies/{user_id}`
 - `POST /api/v1/transcriptions/webhooks/read-ai`
+- `POST /api/v1/transcriptions/webhooks/read-ai/{user_id}`
 - `GET /api/v1/transcriptions/received`
 - `GET /api/v1/transcriptions/received/by-meeting/{meeting_id}`
 - `POST /api/v1/transcriptions/backfill/{meeting_id}`
@@ -155,6 +159,10 @@ http://localhost:8000/api/health
 
 ## Webhooks de transcripciones
 - Los endpoints reciben JSON crudo y normalizan campos clave (meeting id, provider, plataforma y disponibilidad de transcript).
+- Para separar configuracion por usuario, usa URL con `user_id`:
+  - Fireflies: `https://scheduling-lezat-backend-production.up.railway.app/api/transcriptions/webhooks/fireflies/{user_id}`
+  - Read AI: `https://scheduling-lezat-backend-production.up.railway.app/api/transcriptions/webhooks/read-ai/{user_id}`
+- Si el `user_id` no existe, el webhook responde `404`.
 - Fireflies: cuando llega `eventType=Transcription completed`, el backend usa `meetingId` para consultar la API GraphQL de Fireflies y traer la transcripcion final.
 - El backend identifica si el meeting corresponde a Google Meet usando `meeting.platform` o `meeting.url`.
 - Cada webhook aceptado se guarda en MongoDB (coleccion `transcriptions`) con payload crudo, `client_reference_id`, estado de enriquecimiento (`enrichment_status`) y transcripcion de Fireflies cuando esta disponible.
