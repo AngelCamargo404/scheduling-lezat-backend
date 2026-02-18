@@ -24,17 +24,7 @@ def clear_settings_cache() -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("TRANSCRIPTIONS_STORE", "memory")
     monkeypatch.setenv("USER_DATA_STORE", "memory")
-    monkeypatch.setenv("AUTH_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("DEFAULT_ADMIN_EMAIL", "admin")
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "admin")
-    monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", "")
-    monkeypatch.setenv("FIREFLIES_API_KEY", "")
     monkeypatch.setenv("GEMINI_API_KEY", "")
-    monkeypatch.setenv("NOTION_API_TOKEN", "")
-    monkeypatch.setenv("NOTION_TASKS_DATABASE_ID", "")
-    monkeypatch.setenv("GOOGLE_CALENDAR_API_TOKEN", "")
-    monkeypatch.setenv("GOOGLE_CALENDAR_REFRESH_TOKEN", "")
-    monkeypatch.setenv("OUTLOOK_CALENDAR_API_TOKEN", "")
     get_settings.cache_clear()
     clear_transcription_store_cache()
     clear_action_item_creation_store_cache()
@@ -59,7 +49,6 @@ def _get_admin_token() -> str:
 def test_fireflies_webhook_accepts_google_meet_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", "")
     payload = {
         "event": "transcript.completed",
         "meeting": {
@@ -90,7 +79,6 @@ def test_fireflies_webhook_accepts_valid_hmac_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret = "correct-secret"
-    monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", secret)
     payload = {
         "eventType": "transcription completed",
         "meetingId": "meeting-fireflies-2",
@@ -138,15 +126,13 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
     assert data["meeting_id"] == "meeting-read-ai-1"
     assert data["is_google_meet"] is True
     assert data["transcript_text_available"] is True
-    assert data["enrichment_status"] == "not_required"
+    assert data["enrichment_status"] == "skipped_missing_api_key"
     assert data["stored_record_id"]
 
 
-def test_fireflies_webhook_returns_401_when_auth_is_invalid(
+def test_fireflies_webhook_accepts_request_even_with_invalid_webhook_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", "correct-secret")
-
     payload = {
         "meeting": {"platform": "google_meet"},
         "transcript": {"text": "Texto"},
@@ -157,8 +143,7 @@ def test_fireflies_webhook_returns_401_when_auth_is_invalid(
         headers={"X-Webhook-Secret": "wrong-secret"},
     )
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid webhook signature."
+    assert response.status_code == 202
 
 
 def test_list_received_transcriptions_returns_saved_items() -> None:
@@ -180,10 +165,26 @@ def test_list_received_transcriptions_returns_saved_items() -> None:
 def test_fireflies_webhook_fetches_transcript_with_meeting_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FIREFLIES_API_KEY", "fake-api-key")
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    user = user_store.create_user(
+        email="cesar@example.com",
+        full_name="Cesar",
+        password_hash="hashed",
+        role="user",
+    )
+    user_store.upsert_user_settings_values(
+        str(user["_id"]),
+        {"FIREFLIES_API_KEY": "fake-api-key"},
+    )
 
-    def fake_fetch(self: TranscriptionService, meeting_id: str) -> dict[str, object]:
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        fireflies_client: object | None = None,
+    ) -> dict[str, object]:
         assert meeting_id == "ASxwZxCstx"
+        assert fireflies_client is not None
         return {
             "id": "ASxwZxCstx",
             "meeting_link": "https://meet.google.com/abc-defg-hij",
@@ -205,6 +206,7 @@ def test_fireflies_webhook_fetches_transcript_with_meeting_id(
         "meetingId": "ASxwZxCstx",
         "eventType": "Transcription completed",
         "clientReferenceId": "be582c46-4ac9-4565-9ba6-6ab4264496a8",
+        "participants": ["cesar@example.com"],
     }
     response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
 
@@ -242,11 +244,23 @@ def test_backfill_updates_existing_record_by_meeting_id(
     assert created_data["enrichment_status"] == "skipped_missing_api_key"
     assert created_data["transcript_text_available"] is False
 
-    monkeypatch.setenv("FIREFLIES_API_KEY", "fake-api-key")
-    get_settings.cache_clear()
+    token = _get_admin_token()
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    admin_user = user_store.get_user_by_email("admin")
+    assert admin_user is not None
+    user_store.upsert_user_settings_values(
+        str(admin_user["_id"]),
+        {"FIREFLIES_API_KEY": "fake-api-key"},
+    )
 
-    def fake_fetch(self: TranscriptionService, meeting_id: str) -> dict[str, object]:
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        fireflies_client: object | None = None,
+    ) -> dict[str, object]:
         assert meeting_id == "legacy-meeting-1"
+        assert fireflies_client is not None
         return {
             "id": "transcript-legacy-1",
             "meeting_link": "https://meet.google.com/legacy-meeting-1",
@@ -259,7 +273,6 @@ def test_backfill_updates_existing_record_by_meeting_id(
 
     monkeypatch.setattr(TranscriptionService, "_fetch_fireflies_transcript", fake_fetch)
 
-    token = _get_admin_token()
     backfill_response = client.post(
         "/api/transcriptions/backfill/legacy-meeting-1",
         headers={"Authorization": f"Bearer {token}"},
@@ -278,8 +291,6 @@ def test_backfill_updates_existing_record_by_meeting_id(
 def test_webhook_persists_action_items_sync_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FIREFLIES_WEBHOOK_SECRET", "")
-
     def fake_sync(
         self: TranscriptionService,
         *,
@@ -356,12 +367,6 @@ def test_webhook_persists_action_items_sync_result(
 def test_webhook_uses_user_integration_tokens_based_on_participant_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FIREFLIES_API_KEY", "fake-api-key")
-    monkeypatch.setenv("NOTION_API_TOKEN", "")
-    monkeypatch.setenv("NOTION_TASKS_DATABASE_ID", "")
-    monkeypatch.setenv("GOOGLE_CALENDAR_API_TOKEN", "")
-    monkeypatch.setenv("OUTLOOK_CALENDAR_API_TOKEN", "")
-    get_settings.cache_clear()
     clear_user_store_cache()
 
     settings = get_settings()
@@ -375,6 +380,7 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
     user_store.upsert_user_settings_values(
         str(user["_id"]),
         {
+            "FIREFLIES_API_KEY": "user-fireflies-token",
             "NOTION_API_TOKEN": "user-notion-token",
             "NOTION_TASKS_DATABASE_ID": "user-notion-db",
             "GOOGLE_CALENDAR_API_TOKEN": "user-google-token",
@@ -382,8 +388,13 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
         },
     )
 
-    def fake_fetch(self: TranscriptionService, meeting_id: str) -> dict[str, object]:
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        fireflies_client: object | None = None,
+    ) -> dict[str, object]:
         assert meeting_id == "meeting-user-settings-1"
+        assert fireflies_client is not None
         return {
             "id": "meeting-user-settings-1",
             "meeting_link": "https://meet.google.com/abc-defg-hij",
@@ -430,6 +441,7 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
     payload = {
         "meetingId": "meeting-user-settings-1",
         "eventType": "Transcription completed",
+        "participants": ["adcamargo10@gmail.com"],
     }
     response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
     assert response.status_code == 202
@@ -445,8 +457,19 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
 def test_webhook_skips_action_item_sync_when_autosync_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TRANSCRIPTION_AUTOSYNC_ENABLED", "false")
-    get_settings.cache_clear()
+    clear_user_store_cache()
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    user = user_store.create_user(
+        email="autosync.off@example.com",
+        full_name="Autosync Off",
+        password_hash="hashed",
+        role="user",
+    )
+    user_store.upsert_user_settings_values(
+        str(user["_id"]),
+        {"TRANSCRIPTION_AUTOSYNC_ENABLED": "false"},
+    )
 
     calls = {"sync": 0}
 
@@ -472,6 +495,7 @@ def test_webhook_skips_action_item_sync_when_autosync_is_disabled(
     payload = {
         "event": "transcript.completed",
         "meeting": {"id": "meeting-autosync-off-1", "platform": "google_meet"},
+        "participants": ["autosync.off@example.com"],
         "transcript": {"text": "Crear tarea de seguimiento para el viernes."},
     }
     response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)

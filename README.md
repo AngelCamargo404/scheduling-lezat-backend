@@ -50,32 +50,46 @@ PowerShell:
 ```bash
 pip install -e ".[dev]"
 ```
-4. (Opcional) configura secretos para webhooks:
+4. Configura solo las variables de entorno permitidas:
 ```env
-FIREFLIES_WEBHOOK_SECRET=<secreto-compartido>
-FIREFLIES_API_URL=https://api.fireflies.ai/graphql
-FIREFLIES_API_KEY=<api-key-fireflies>
-FIREFLIES_API_TIMEOUT_SECONDS=10
-FIREFLIES_API_USER_AGENT=LezatSchedulingBackend/1.0
-READ_AI_WEBHOOK_SECRET=<secreto-compartido>
-TRANSCRIPTION_AUTOSYNC_ENABLED=true
+APP_NAME=Lezat Scheduling API
+APP_ENV=development
+APP_VERSION=0.1.0
+API_PREFIX=/api
+ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 TRANSCRIPTIONS_STORE=mongodb
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB_NAME=lezat_scheduling
 MONGODB_TRANSCRIPTIONS_COLLECTION=transcriptions
 MONGODB_CONNECT_TIMEOUT_MS=2000
+MONGODB_USER_SETTINGS_COLLECTION=user_integration_settings
+MONGODB_USERS_COLLECTION=users
+USER_DATA_STORE=mongodb
+FIREFLIES_API_URL=https://api.fireflies.ai/graphql
+FIREFLIES_API_TIMEOUT_SECONDS=10
+FIREFLIES_API_USER_AGENT=LezatSchedulingBackend/1.0
 GEMINI_API_KEY=<api-key-gemini>
 GEMINI_MODEL=gemini-3-flash-preview
 GEMINI_API_TIMEOUT_SECONDS=45
-NOTION_API_TOKEN=<token-de-integracion-notion>
-NOTION_TASKS_DATABASE_ID=<database-id-kanban>
-NOTION_TASK_STATUS_PROPERTY=Status
-ACTION_ITEMS_TEST_DUE_DATE=
-GOOGLE_CALENDAR_API_TOKEN=<access-token-google-calendar>
-GOOGLE_CALENDAR_REFRESH_TOKEN=<refresh-token-google-calendar>
+FRONTEND_BASE_URL=http://localhost:3000
+NOTION_API_TIMEOUT_SECONDS=30
+NOTION_API_VERSION=2022-06-28
+NOTION_CLIENT_ID=<notion-client-id>
+NOTION_CLIENT_SECRET=<notion-client-secret>
+NOTION_REDIRECT_URI=http://localhost:8000/api/integrations/notion/callback
+GOOGLE_CALENDAR_CLIENT_ID=<google-client-id>
+GOOGLE_CALENDAR_CLIENT_SECRET=<google-client-secret>
+GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:8000/api/integrations/google-calendar/callback
 GOOGLE_CALENDAR_ID=primary
 GOOGLE_CALENDAR_API_TIMEOUT_SECONDS=10
 GOOGLE_CALENDAR_EVENT_TIMEZONE=UTC
+OUTLOOK_CLIENT_ID=<outlook-client-id>
+OUTLOOK_CLIENT_SECRET=<outlook-client-secret>
+OUTLOOK_TENANT_ID=common
+OUTLOOK_REDIRECT_URI=http://localhost:8000/api/integrations/outlook-calendar/callback
+AUTH_GOOGLE_CLIENT_ID=<auth-google-client-id>
+AUTH_GOOGLE_CLIENT_SECRET=<auth-google-client-secret>
+AUTH_GOOGLE_REDIRECT_URI=http://localhost:8000/api/auth/google/callback
 ```
 
 ## Correr en local
@@ -126,30 +140,29 @@ http://localhost:8000/api/health
 - `GET /api/v1/transcriptions/received/{record_id}`
 
 ## Autenticacion y configuracion por usuario
-- El backend crea automaticamente un usuario admin inicial con `DEFAULT_ADMIN_EMAIL` y `DEFAULT_ADMIN_PASSWORD` (por defecto: `admin` / `admin`).
+- El backend crea automaticamente un usuario admin inicial (`admin` / `admin`).
 - Las contraseñas se almacenan con hash `PBKDF2-HMAC-SHA256`.
 - Tambien puedes autenticar con Google OAuth (openid email profile) configurando:
   - `AUTH_GOOGLE_CLIENT_ID`
   - `AUTH_GOOGLE_CLIENT_SECRET`
   - `AUTH_GOOGLE_REDIRECT_URI`
-- `GET/PATCH /api/integrations/settings` y `GET /api/integrations/status` requieren token Bearer y guardan configuracion por usuario en MongoDB (`MONGODB_USER_SETTINGS_COLLECTION`).
+- `GET/PATCH /api/integrations/settings` y `GET /api/integrations/status` requieren token Bearer y guardan configuracion por usuario en MongoDB (`MONGODB_USER_SETTINGS_COLLECTION` / `user_integration_settings`).
 - El almacenamiento de usuarios, configuraciones e historico de transcripciones se gestiona en MongoDB y no se expone para edicion desde la interfaz de integraciones.
 - Los valores sensibles no se devuelven en texto plano desde el endpoint de settings (`value=null` para campos sensibles).
+- Fireflies es obligatorio para operar los flujos de transcripcion.
+- Ademas de Fireflies, debes conectar al menos una salida: Google Calendar, Outlook Calendar o Notion Kanban.
+- Si usas Notion, debes completar Database ID y los datos clave de integracion (token, permisos y mapeos/campos requeridos por el flujo).
 
 ## Webhooks de transcripciones
 - Los endpoints reciben JSON crudo y normalizan campos clave (meeting id, provider, plataforma y disponibilidad de transcript).
-- Fireflies: si configuras `FIREFLIES_WEBHOOK_SECRET`, el backend valida `x-hub-signature` (HMAC SHA-256) del payload. Para pruebas manuales tambien acepta `X-Webhook-Secret` o `Authorization: Bearer <token>`.
 - Fireflies: cuando llega `eventType=Transcription completed`, el backend usa `meetingId` para consultar la API GraphQL de Fireflies y traer la transcripcion final.
-- READ AI: No requiere validacion de secreto (`READ_AI_WEBHOOK_SECRET` no se usa). El webhook se asocia por API Key.
 - El backend identifica si el meeting corresponde a Google Meet usando `meeting.platform` o `meeting.url`.
 - Cada webhook aceptado se guarda en MongoDB (coleccion `transcriptions`) con payload crudo, `client_reference_id`, estado de enriquecimiento (`enrichment_status`) y transcripcion de Fireflies cuando esta disponible.
 - Cada nota/tarea creada en Notion desde una transcripcion se registra ademas en MongoDB (coleccion `action_item_creations`) con meeting id, pagina de Notion y estado de sincronizacion con calendarios.
 - En respuestas de consulta (`/received`, `/received/{record_id}`, `/received/by-meeting/{meeting_id}`), los registros de Fireflies exponen `transcript_sentences` (oraciones con speaker y tiempos) y `participant_emails` (emails unificados de participantes).
 - Si configuras Gemini + Notion, cada webhook intenta extraer tareas de la reunion y crear tarjetas en un Kanban de Notion usando la propiedad de estado configurada.
-- Si `TRANSCRIPTION_AUTOSYNC_ENABLED=false`, el backend sigue recibiendo y guardando la transcripcion, pero omite la creacion automatica de notas y eventos.
-- Si una tarea extraida incluye fecha de entrega (`due_date`) y configuras `GOOGLE_CALENDAR_API_TOKEN`, el backend tambien crea un evento de dia completo en Google Calendar con el contexto de la reunion en la descripcion.
-- Para pruebas controladas, puedes forzar fecha en tareas sin `due_date` usando `ACTION_ITEMS_TEST_DUE_DATE=YYYY-MM-DD`.
-- Si tienes registros antiguos sin texto, usa `POST /api/transcriptions/backfill/{meeting_id}` para reconsultar Fireflies y actualizar los documentos existentes por ese `meeting_id`.
+- Si una tarea extraida incluye fecha de entrega (`due_date`) y configuras Google Calendar/Outlook por usuario, el backend tambien crea eventos en calendario.
+- `POST /api/transcriptions/backfill/{meeting_id}` sirve para completar registros antiguos, pero no forma parte del onboarding base.
 
 ## Calidad y pruebas
 - Ejecutar pruebas:

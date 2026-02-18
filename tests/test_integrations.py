@@ -11,18 +11,7 @@ from app.services.user_store import clear_user_store_cache, create_user_store
 @pytest.fixture(autouse=True)
 def reset_auth_and_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_DATA_STORE", "memory")
-    monkeypatch.setenv("AUTH_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("AUTH_TOKEN_TTL_MINUTES", "60")
-    monkeypatch.setenv("DEFAULT_ADMIN_EMAIL", "admin")
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "admin")
-    monkeypatch.setenv("DEFAULT_ADMIN_FULL_NAME", "Administrator")
-
-    monkeypatch.setenv("FIREFLIES_API_KEY", "")
     monkeypatch.setenv("GEMINI_API_KEY", "")
-    monkeypatch.setenv("NOTION_API_TOKEN", "")
-    monkeypatch.setenv("NOTION_TASKS_DATABASE_ID", "")
-    monkeypatch.setenv("GOOGLE_CALENDAR_API_TOKEN", "")
-    monkeypatch.setenv("GOOGLE_CALENDAR_REFRESH_TOKEN", "")
     monkeypatch.setenv("NOTION_CLIENT_ID", "")
     monkeypatch.setenv("NOTION_CLIENT_SECRET", "")
     monkeypatch.setenv("NOTION_REDIRECT_URI", "")
@@ -33,7 +22,6 @@ def reset_auth_and_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUTLOOK_CLIENT_SECRET", "")
     monkeypatch.setenv("OUTLOOK_TENANT_ID", "")
     monkeypatch.setenv("OUTLOOK_REDIRECT_URI", "")
-    monkeypatch.setenv("OUTLOOK_CALENDAR_API_TOKEN", "")
 
     clear_user_store_cache()
     get_settings.cache_clear()
@@ -112,9 +100,6 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
 ) -> None:
-    monkeypatch.setenv("FIREFLIES_API_KEY", "seed-fireflies-token")
-    monkeypatch.setenv("TRANSCRIPTION_AUTOSYNC_ENABLED", "false")
-    monkeypatch.setenv("NOTION_TASK_STATUS_PROPERTY", "Status")
     monkeypatch.setenv(
         "NOTION_REDIRECT_URI",
         "http://localhost:8000/api/integrations/notion/callback",
@@ -135,7 +120,7 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     fireflies_key_field = next(
         field for field in fireflies_group["fields"] if field["env_var"] == "FIREFLIES_API_KEY"
     )
-    assert fireflies_key_field["configured"] is True
+    assert fireflies_key_field["configured"] is False
     assert fireflies_key_field["sensitive"] is True
     assert fireflies_key_field["value"] is None
     autosync_field = next(
@@ -145,6 +130,13 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     )
     assert autosync_field["configured"] is True
     assert autosync_field["value"] == "true"
+
+    oauth_notion_group = next(group for group in payload["groups"] if group["id"] == "oauth_notion")
+    notion_redirect_field = next(
+        field for field in oauth_notion_group["fields"] if field["env_var"] == "NOTION_REDIRECT_URI"
+    )
+    assert notion_redirect_field["configured"] is True
+    assert notion_redirect_field["value"] == "http://localhost:8000/api/integrations/notion/callback"
 
 
 def test_integrations_settings_patch_updates_only_current_user(client: TestClient) -> None:

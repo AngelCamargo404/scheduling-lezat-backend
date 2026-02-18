@@ -4,6 +4,49 @@ from typing import Annotated
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+ALLOWED_ENV_FIELD_NAMES = frozenset(
+    {
+        "app_name",
+        "app_env",
+        "app_version",
+        "api_prefix",
+        "allowed_origins",
+        "fireflies_api_url",
+        "fireflies_api_timeout_seconds",
+        "fireflies_api_user_agent",
+        "transcriptions_store",
+        "mongodb_uri",
+        "mongodb_db_name",
+        "mongodb_transcriptions_collection",
+        "mongodb_connect_timeout_ms",
+        "gemini_api_key",
+        "gemini_model",
+        "gemini_api_timeout_seconds",
+        "frontend_base_url",
+        "notion_api_timeout_seconds",
+        "notion_api_version",
+        "notion_client_id",
+        "notion_client_secret",
+        "notion_redirect_uri",
+        "google_calendar_client_id",
+        "google_calendar_client_secret",
+        "google_calendar_redirect_uri",
+        "google_calendar_event_timezone",
+        "google_calendar_id",
+        "google_calendar_api_timeout_seconds",
+        "outlook_client_id",
+        "outlook_client_secret",
+        "outlook_tenant_id",
+        "outlook_redirect_uri",
+        "mongodb_user_settings_collection",
+        "mongodb_users_collection",
+        "user_data_store",
+        "auth_google_client_id",
+        "auth_google_redirect_uri",
+        "auth_google_client_secret",
+    },
+)
+
 
 class Settings(BaseSettings):
     app_name: str = "Lezat Scheduling API"
@@ -34,7 +77,7 @@ class Settings(BaseSettings):
     mongodb_user_settings_collection: str = "user_integration_settings"
     mongodb_connect_timeout_ms: int = 2000
     user_data_store: str = "mongodb"
-    force_user_settings_user_id: str = "6990d16c6ed39a654990a2df"
+    force_user_settings_user_id: str = ""
     auth_secret_key: str = "change-me-in-production"
     auth_token_ttl_minutes: int = 60 * 12
     default_admin_email: str = "admin"
@@ -81,6 +124,29 @@ class Settings(BaseSettings):
     outlook_calendar_event_timezone: str = "UTC"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        def _filter_allowed_env_fields(source):
+            return {
+                field_name: raw_value
+                for field_name, raw_value in source().items()
+                if field_name in ALLOWED_ENV_FIELD_NAMES
+            }
+
+        return (
+            init_settings,
+            lambda: _filter_allowed_env_fields(env_settings),
+            lambda: _filter_allowed_env_fields(dotenv_settings),
+            file_secret_settings,
+        )
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

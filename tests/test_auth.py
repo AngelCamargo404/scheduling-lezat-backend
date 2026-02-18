@@ -9,11 +9,6 @@ from app.services.user_store import clear_user_store_cache
 @pytest.fixture(autouse=True)
 def reset_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_DATA_STORE", "memory")
-    monkeypatch.setenv("AUTH_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("AUTH_TOKEN_TTL_MINUTES", "60")
-    monkeypatch.setenv("DEFAULT_ADMIN_EMAIL", "admin")
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "admin")
-    monkeypatch.setenv("DEFAULT_ADMIN_FULL_NAME", "Administrator")
 
     clear_user_store_cache()
     get_settings.cache_clear()
