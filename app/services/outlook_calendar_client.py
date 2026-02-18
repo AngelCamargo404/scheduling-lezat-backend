@@ -19,7 +19,11 @@ class OutlookCalendarClient:
         default_timezone: str = "UTC",
         api_base_url: str = "https://graph.microsoft.com/v1.0",
     ) -> None:
-        self.access_token = access_token
+        normalized_token = access_token.strip()
+        # Accept pasted values like "Bearer <token>" and keep only the raw token.
+        if normalized_token.lower().startswith("bearer "):
+            normalized_token = normalized_token.split(" ", maxsplit=1)[1].strip()
+        self.access_token = normalized_token
         self.timeout_seconds = timeout_seconds
         self.default_timezone = default_timezone
         self.api_base_url = api_base_url.rstrip("/")
@@ -57,6 +61,10 @@ class OutlookCalendarClient:
         path: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if self.access_token.count(".") < 2:
+            raise OutlookCalendarError(
+                "OUTLOOK_CALENDAR_API_TOKEN is invalid. Reconnect Outlook Calendar using OAuth.",
+            )
         target = f"{self.api_base_url}{path}"
         raw_payload: bytes | None = None
         if payload is not None:
