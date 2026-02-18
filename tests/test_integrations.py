@@ -446,7 +446,10 @@ def test_outlook_calendar_connect_redirects_to_microsoft_oauth(
     location = response.headers["location"]
     assert location.startswith("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?")
     assert "client_id=outlook-client-id" in location
-    assert "scope=offline_access+Calendars.ReadWrite+User.Read" in location
+    query = parse_qs(urlparse(location).query)
+    assert query.get("scope") == [
+        "offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Calendars.ReadWrite"
+    ]
 
 
 def test_outlook_calendar_callback_stores_access_token_per_user(

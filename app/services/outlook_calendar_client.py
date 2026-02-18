@@ -61,9 +61,9 @@ class OutlookCalendarClient:
         path: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if self.access_token.count(".") < 2:
+        if not self.access_token:
             raise OutlookCalendarError(
-                "OUTLOOK_CALENDAR_API_TOKEN is invalid. Reconnect Outlook Calendar using OAuth.",
+                "OUTLOOK_CALENDAR_API_TOKEN is missing. Reconnect Outlook Calendar using OAuth.",
             )
         target = f"{self.api_base_url}{path}"
         raw_payload: bytes | None = None
@@ -86,6 +86,11 @@ class OutlookCalendarClient:
             raise OutlookCalendarError("Outlook Calendar API request timed out.") from exc
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore")
+            if exc.code == 401 and "IDX14100" in body:
+                raise OutlookCalendarError(
+                    "Outlook Calendar OAuth token is not valid for Microsoft Graph. "
+                    "Reconnect Outlook Calendar and verify Graph Calendars.ReadWrite permission.",
+                ) from exc
             raise OutlookCalendarError(
                 f"Outlook Calendar API HTTP {exc.code}: {body or 'empty response body'}",
             ) from exc

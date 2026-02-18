@@ -38,6 +38,11 @@ _GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _OUTLOOK_OAUTH_AUTHORIZE_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
 _OUTLOOK_OAUTH_TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+_OUTLOOK_GRAPH_SCOPES = (
+    "offline_access "
+    "https://graph.microsoft.com/User.Read "
+    "https://graph.microsoft.com/Calendars.ReadWrite"
+)
 
 
 @dataclass(frozen=True)
@@ -744,7 +749,7 @@ def start_outlook_calendar_oauth(
             "response_type": "code",
             "redirect_uri": redirect_uri,
             "response_mode": "query",
-            "scope": "offline_access Calendars.ReadWrite User.Read",
+            "scope": _OUTLOOK_GRAPH_SCOPES,
             "state": state_token,
             "prompt": "select_account",
         },
@@ -1306,7 +1311,7 @@ def _exchange_outlook_calendar_code_for_token(
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": redirect_uri,
-            "scope": "offline_access Calendars.ReadWrite User.Read",
+            "scope": _OUTLOOK_GRAPH_SCOPES,
         },
     ).encode("utf-8")
     token_url = _OUTLOOK_OAUTH_TOKEN_URL_TEMPLATE.format(tenant_id=tenant_id)
