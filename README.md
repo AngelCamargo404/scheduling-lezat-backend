@@ -92,6 +92,14 @@ AUTH_GOOGLE_CLIENT_SECRET=<auth-google-client-secret>
 AUTH_GOOGLE_REDIRECT_URI=http://localhost:8000/api/auth/google/callback
 ```
 
+### Dominios por entorno
+- `APP_ENV=development` (o vacio):
+  - Defaults de frontend/CORS en `localhost` (`3000`) y redirect URIs del backend en `http://localhost:8000`.
+- `APP_ENV=production`:
+  - Defaults a dominios de produccion actuales:
+    - Frontend: `https://abundant-balance-production-9587.up.railway.app`
+    - Backend/OAuth callbacks: `https://scheduling-lezat-backend-production.up.railway.app`
+
 ## Correr en local
 1. Inicia la API:
 ```bash
@@ -154,21 +162,24 @@ http://localhost:8000/api/health
 - El almacenamiento de usuarios, configuraciones e historico de transcripciones se gestiona en MongoDB y no se expone para edicion desde la interfaz de integraciones.
 - Los valores sensibles no se devuelven en texto plano desde el endpoint de settings (`value=null` para campos sensibles).
 - Fireflies es obligatorio para operar los flujos de transcripcion.
-- Ademas de Fireflies, debes conectar al menos una salida: Google Calendar, Outlook Calendar o Notion Kanban.
+- Ademas de Fireflies, debes conectar al menos una salida: Google Calendar, Notion Kanban o Monday Kanban.
 - Si usas Notion, debes completar Database ID y los datos clave de integracion (token, permisos y mapeos/campos requeridos por el flujo).
+- Si usas Monday, debes completar Board ID, Group ID y los datos clave de integracion (token OAuth, columna de estado y mapeos/campos requeridos por el flujo).
 
 ## Webhooks de transcripciones
 - Los endpoints reciben JSON crudo y normalizan campos clave (meeting id, provider, plataforma y disponibilidad de transcript).
-- Para separar configuracion por usuario, usa URL con `user_id`:
-  - Fireflies: `https://scheduling-lezat-backend-production.up.railway.app/api/transcriptions/webhooks/fireflies/{user_id}`
-  - Read AI: `https://scheduling-lezat-backend-production.up.railway.app/api/transcriptions/webhooks/read-ai/{user_id}`
+- Para separar configuracion por usuario, usa `BACKEND_BASE_URL` segun entorno:
+  - Desarrollo: `http://localhost:8000`
+  - Produccion: `https://scheduling-lezat-backend-production.up.railway.app`
+  - Fireflies: `{BACKEND_BASE_URL}/api/transcriptions/webhooks/fireflies/{user_id}`
+  - Read AI: `{BACKEND_BASE_URL}/api/transcriptions/webhooks/read-ai/{user_id}`
 - Si el `user_id` no existe, el webhook responde `404`.
 - Fireflies: cuando llega `eventType=Transcription completed`, el backend usa `meetingId` para consultar la API GraphQL de Fireflies y traer la transcripcion final.
 - El backend identifica si el meeting corresponde a Google Meet usando `meeting.platform` o `meeting.url`.
 - Cada webhook aceptado se guarda en MongoDB (coleccion `transcriptions`) con payload crudo, `client_reference_id`, estado de enriquecimiento (`enrichment_status`) y transcripcion de Fireflies cuando esta disponible.
-- Cada nota/tarea creada en Notion desde una transcripcion se registra ademas en MongoDB (coleccion `action_item_creations`) con meeting id, pagina de Notion y estado de sincronizacion con calendarios.
+- Cada nota/tarea creada desde una transcripcion (Notion/Monday) se registra ademas en MongoDB (coleccion `action_item_creations`) con meeting id, identificadores de salida y estado de sincronizacion con calendarios.
 - En respuestas de consulta (`/received`, `/received/{record_id}`, `/received/by-meeting/{meeting_id}`), los registros de Fireflies exponen `transcript_sentences` (oraciones con speaker y tiempos) y `participant_emails` (emails unificados de participantes).
-- Si configuras Gemini + Notion, cada webhook intenta extraer tareas de la reunion y crear tarjetas en un Kanban de Notion usando la propiedad de estado configurada.
+- Si configuras Gemini + Notion/Monday, cada webhook intenta extraer tareas de la reunion y crear tarjetas en el Kanban configurado.
 - Si una tarea extraida incluye fecha de entrega (`due_date`) y configuras Google Calendar/Outlook por usuario, el backend tambien crea eventos en calendario.
 - `POST /api/transcriptions/backfill/{meeting_id}` sirve para completar registros antiguos, pero no forma parte del onboarding base.
 

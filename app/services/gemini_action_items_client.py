@@ -211,6 +211,18 @@ class GeminiActionItemsClient:
             "- Si aparece fecha tipo '23 de febrero' sin anio, usa anio_actual.\n"
             "- Si aparece '25 de este mes', usa mes_actual y anio_actual.\n"
             "Si no existe una fecha inferible, deja due_date en null.\n"
+            "Reglas de agenda de reunion:\n"
+            "- Si la tarea implica agendar reunion y hay hora explicita, llena scheduled_start en ISO "
+            "local YYYY-MM-DDTHH:MM:SS.\n"
+            "- Si hay fin/duracion explicita, llena scheduled_end. Si no, deja scheduled_end en null.\n"
+            "- Si se menciona zona horaria explicita (EST, PST, hora de Mexico, etc.), llena "
+            "event_timezone con formato IANA (ej. America/New_York, America/Mexico_City).\n"
+            "- Si hay frecuencia (todos los jueves, cada semana, cada mes, al inicio de cada mes), "
+            "llena recurrence_rule usando RRULE sin prefijo RRULE: (ej. "
+            "FREQ=WEEKLY;INTERVAL=1;BYDAY=TH).\n"
+            "- Si la transcripcion pide videollamada, llena online_meeting_platform con uno de: "
+            "google_meet, microsoft_teams, auto.\n"
+            "- Si no aplica agenda/recurrencia/videollamada, deja esos campos en null.\n"
             "Incluye en source_sentence la frase exacta donde aparezca la tarea y/o la pista temporal.\n"
             "Devuelve un JSON con este formato exacto:\n"
             "{\n"
@@ -220,6 +232,11 @@ class GeminiActionItemsClient:
             '      "assignee_email": "string|null",\n'
             '      "assignee_name": "string|null",\n'
             '      "due_date": "YYYY-MM-DD|null",\n'
+            '      "scheduled_start": "YYYY-MM-DDTHH:MM:SS|null",\n'
+            '      "scheduled_end": "YYYY-MM-DDTHH:MM:SS|null",\n'
+            '      "event_timezone": "IANA_TIMEZONE|null",\n'
+            '      "recurrence_rule": "RRULE_WITHOUT_PREFIX|null",\n'
+            '      "online_meeting_platform": "google_meet|microsoft_teams|auto|null",\n'
             '      "details": "string|null",\n'
             '      "source_sentence": "string|null"\n'
             "    }\n"

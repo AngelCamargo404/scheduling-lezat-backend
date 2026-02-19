@@ -12,6 +12,10 @@ from app.services.action_item_creation_store import (
     create_action_item_creation_store,
 )
 from app.services.action_item_sync_service import ActionItemSyncService
+from app.services.team_membership_store import (
+    clear_team_membership_store_cache,
+    create_team_membership_store,
+)
 from app.services.transcription_service import TranscriptionService
 from app.services.transcription_store import clear_transcription_store_cache
 from app.services.user_store import clear_user_store_cache, create_user_store
@@ -29,12 +33,14 @@ def clear_settings_cache() -> None:
     clear_transcription_store_cache()
     clear_action_item_creation_store_cache()
     clear_user_store_cache()
+    clear_team_membership_store_cache()
     yield
     monkeypatch.undo()
     get_settings.cache_clear()
     clear_transcription_store_cache()
     clear_action_item_creation_store_cache()
     clear_user_store_cache()
+    clear_team_membership_store_cache()
 
 
 def _get_admin_token() -> str:
@@ -113,6 +119,10 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
             "external_id": "meeting-read-ai-1",
             "join_url": "https://meet.google.com/zyx-wvut-srq",
         },
+        "participants": [
+            {"name": "Ana", "email": "ana@example.com"},
+            {"name": "Luis", "email": "luis@example.com"},
+        ],
         "summary": {
             "transcript": "Reunion finalizada, se definieron los siguientes acuerdos.",
         },
@@ -128,6 +138,15 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
     assert data["transcript_text_available"] is True
     assert data["enrichment_status"] == "skipped_missing_api_key"
     assert data["stored_record_id"]
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-read-ai-1")
+    assert lookup_response.status_code == 200
+    record = lookup_response.json()
+    assert record["participant_emails"] == ["ana@example.com", "luis@example.com"]
+    assert record["participants"] == [
+        {"name": "Ana", "email": "ana@example.com", "external_id": None, "role": None},
+        {"name": "Luis", "email": "luis@example.com", "external_id": None, "role": None},
+    ]
 
 
 def test_fireflies_webhook_with_user_id_uses_user_settings(
@@ -296,8 +315,8 @@ def test_fireflies_webhook_fetches_transcript_with_meeting_id(
             "id": "ASxwZxCstx",
             "meeting_link": "https://meet.google.com/abc-defg-hij",
             "meeting_attendees": [
-                {"email": "cesar@example.com"},
-                {"email": "alex@example.com"},
+                {"email": "cesar@example.com", "name": "Cesar"},
+                {"email": "alex@example.com", "name": "Alex"},
             ],
             "participants": ["alex@example.com"],
             "organizer_email": "cesar@example.com",
@@ -333,6 +352,15 @@ def test_fireflies_webhook_fetches_transcript_with_meeting_id(
     assert len(record["transcript_sentences"]) == 2
     assert record["transcript_sentences"][0]["speaker_name"] == "Cesar"
     assert record["participant_emails"] == ["alex@example.com", "cesar@example.com"]
+    assert record["participants"] == [
+        {
+            "name": "Cesar",
+            "email": "cesar@example.com",
+            "external_id": None,
+            "role": "organizer",
+        },
+        {"name": "Alex", "email": "alex@example.com", "external_id": None, "role": None},
+    ]
     assert record["enrichment_status"] == "completed"
     assert record["fireflies_transcript"]["id"] == "ASxwZxCstx"
 
@@ -522,6 +550,7 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
         transcript_text: str | None,
         transcript_sentences: list[dict[str, object]],
         participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
     ) -> dict[str, object]:
         captured_tokens["notion"] = self.settings.notion_api_token
         captured_tokens["notion_db"] = self.settings.notion_tasks_database_id
@@ -589,6 +618,7 @@ def test_webhook_skips_action_item_sync_when_autosync_is_disabled(
         transcript_text: str | None,
         transcript_sentences: list[dict[str, object]],
         participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
     ) -> dict[str, object]:
         calls["sync"] += 1
         return {
@@ -620,3 +650,825 @@ def test_webhook_skips_action_item_sync_when_autosync_is_disabled(
     stored_record = lookup_response.json()
     assert stored_record["action_items_sync"]["status"] == "skipped_disabled_by_user"
     assert stored_record["action_items_sync"]["created_count"] == 0
+
+
+def test_webhook_routes_action_items_to_configured_team_recipients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.team@example.com",
+        full_name="Lead Team",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.team@example.com",
+        full_name="Member Team",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo Shared",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id, member_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+
+    captured_notion_tokens: list[str] = []
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        captured_notion_tokens.append(self.settings.notion_api_token)
+        assert meeting_id == "meeting-team-routing-1"
+        assert transcript_text is not None
+        assert transcript_sentences == []
+        assert participant_emails == ["member.team@example.com"]
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [{"title": "Tarea", "status": "created"}],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-team-routing-1",
+            "platform": "google_meet",
+        },
+        "participants": ["member.team@example.com"],
+        "transcript": {
+            "id": "transcript-team-routing-1",
+            "text": "Registrar acuerdo del equipo.",
+        },
+    }
+    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 2
+    assert sorted(captured_notion_tokens) == [
+        "lead-notion-token",
+        "member-notion-token",
+    ]
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-team-routing-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    assert stored_record["action_items_sync"]["routed_via_team_memberships"] is True
+    assert stored_record["action_items_sync"]["matched_team_ids"] == [team_id]
+    assert len(stored_record["action_items_sync"]["target_users"]) == 2
+    assert stored_record["action_items_sync"]["created_count"] == 2
+
+
+def test_user_scoped_webhook_routes_to_lead_and_members_with_user_specific_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.outputs@example.com",
+        full_name="Lead Outputs",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.outputs@example.com",
+        full_name="Member Outputs",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-notion-token",
+            "GOOGLE_CALENDAR_API_TOKEN": "lead-google-token",
+            "OUTLOOK_CALENDAR_API_TOKEN": "",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-notion-token",
+            "GOOGLE_CALENDAR_API_TOKEN": "",
+            "OUTLOOK_CALENDAR_API_TOKEN": "member-outlook-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo Outputs",
+        created_by_user_id=lead_user_id,
+        # Keep member out of recipient list on purpose: user-scoped webhooks
+        # should still fan out to all accepted team members.
+        recipient_user_ids=[lead_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+
+    captured_user_channels: list[tuple[str, str]] = []
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        assert meeting_id == "meeting-lead-user-scope-1"
+        assert transcript_text == "Enviar resumen y crear tareas."
+        assert transcript_sentences == []
+        assert participant_emails == ["external.guest@example.com"]
+
+        google_token = self.settings.google_calendar_api_token
+        outlook_token = self.settings.outlook_calendar_api_token
+        captured_user_channels.append((google_token, outlook_token))
+
+        if google_token == "lead-google-token":
+            return {
+                "status": "completed",
+                "extracted_count": 1,
+                "created_count": 1,
+                "google_calendar_status": "completed",
+                "google_calendar_created_count": 1,
+                "google_calendar_error": None,
+                "outlook_calendar_status": "not_required_no_due_dates",
+                "outlook_calendar_created_count": 0,
+                "outlook_calendar_error": None,
+                "items": [],
+                "error": None,
+            }
+
+        if outlook_token == "member-outlook-token":
+            return {
+                "status": "completed",
+                "extracted_count": 1,
+                "created_count": 1,
+                "google_calendar_status": "not_required_no_due_dates",
+                "google_calendar_created_count": 0,
+                "google_calendar_error": None,
+                "outlook_calendar_status": "completed",
+                "outlook_calendar_created_count": 1,
+                "outlook_calendar_error": None,
+                "items": [],
+                "error": None,
+            }
+
+        return {
+            "status": "failed_unexpected",
+            "extracted_count": 0,
+            "created_count": 0,
+            "google_calendar_status": "failed_sync",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": "Unexpected token combination.",
+            "outlook_calendar_status": "failed_sync",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": "Unexpected token combination.",
+            "items": [],
+            "error": "Unexpected token combination.",
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-lead-user-scope-1",
+            "platform": "google_meet",
+        },
+        # No internal participant emails: team routing must still work
+        # because webhook is scoped to the lead user id.
+        "participants": ["external.guest@example.com"],
+        "transcript": {
+            "id": "transcript-lead-user-scope-1",
+            "text": "Enviar resumen y crear tareas.",
+        },
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{lead_user_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 2
+    assert sorted(captured_user_channels) == [
+        ("", "member-outlook-token"),
+        ("lead-google-token", ""),
+    ]
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-lead-user-scope-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["routed_via_team_memberships"] is True
+    assert action_items_sync["matched_team_ids"] == [team_id]
+    assert action_items_sync["created_count"] == 2
+    assert action_items_sync["google_calendar_created_count"] == 1
+    assert action_items_sync["outlook_calendar_created_count"] == 1
+
+    target_users = {
+        target["user_id"]: target
+        for target in action_items_sync["target_users"]
+    }
+    assert sorted(target_users.keys()) == sorted([lead_user_id, member_user_id])
+    assert target_users[lead_user_id]["google_calendar_status"] == "completed"
+    assert target_users[lead_user_id]["outlook_calendar_status"] == "not_required_no_due_dates"
+    assert target_users[member_user_id]["google_calendar_status"] == "not_required_no_due_dates"
+    assert target_users[member_user_id]["outlook_calendar_status"] == "completed"
+
+
+def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.shared@example.com",
+        full_name="Lead Shared",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.shared@example.com",
+        full_name="Member Shared",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-notion-token",
+            "GOOGLE_CALENDAR_API_TOKEN": "lead-google-token",
+            "OUTLOOK_CALENDAR_API_TOKEN": "lead-outlook-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-notion-token",
+            "GOOGLE_CALENDAR_API_TOKEN": "member-google-token",
+            "OUTLOOK_CALENDAR_API_TOKEN": "member-outlook-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo Shared Links",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id, member_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+    team_store.create_or_get_pending_invitation(
+        team_id=team_id,
+        invited_email="pending.shared@example.com",
+        invited_by_user_id=lead_user_id,
+    )
+
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        assert meeting_id == "meeting-team-shared-links-1"
+        assert transcript_text == "Agendar reunion semanal del equipo."
+        assert participant_emails == ["external.shared@example.com"]
+        captured_calls.append(
+            {
+                "notion": self.settings.notion_api_token,
+                "google": self.settings.google_calendar_api_token,
+                "outlook": self.settings.outlook_calendar_api_token,
+                "attendees": sorted(calendar_attendee_emails or []),
+            },
+        )
+        item = {
+            "title": "Reunion semanal del equipo",
+            "status": "created",
+            "online_meeting_platform": "auto",
+            "due_date": "2026-04-02",
+            "scheduled_start": "2026-04-02T10:00:00",
+            "google_calendar_status": "skipped_missing_configuration",
+            "google_calendar_created_count": 0,
+            "google_calendar_event_id": None,
+            "google_meet_link": None,
+            "google_calendar_error": "GOOGLE_CALENDAR_API_TOKEN is missing.",
+            "outlook_calendar_status": "skipped_missing_configuration",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_event_id": None,
+            "outlook_teams_link": None,
+            "outlook_calendar_error": "OUTLOOK_CALENDAR_API_TOKEN is missing.",
+        }
+        google_token = self.settings.google_calendar_api_token
+        if google_token:
+            item["google_calendar_status"] = "created"
+            item["google_calendar_event_id"] = "google-event-lead"
+            item["google_meet_link"] = "https://meet.google.com/shared-team-link"
+            item["google_calendar_error"] = None
+        outlook_token = self.settings.outlook_calendar_api_token
+        if outlook_token:
+            item["outlook_calendar_status"] = "created"
+            item["outlook_calendar_event_id"] = "outlook-event-lead"
+            item["outlook_teams_link"] = "https://teams.live.com/meet/shared-team-link"
+            item["outlook_calendar_error"] = None
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "monday_status": "not_required_no_action_items",
+            "monday_created_count": 0,
+            "monday_error": None,
+            "google_calendar_status": "completed" if google_token else "skipped_missing_configuration",
+            "google_calendar_created_count": 1 if google_token else 0,
+            "google_calendar_error": None if google_token else "GOOGLE_CALENDAR_API_TOKEN is missing.",
+            "outlook_calendar_status": "completed" if outlook_token else "skipped_missing_configuration",
+            "outlook_calendar_created_count": 1 if outlook_token else 0,
+            "outlook_calendar_error": None if outlook_token else "OUTLOOK_CALENDAR_API_TOKEN is missing.",
+            "items": [item],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-team-shared-links-1",
+            "platform": "google_meet",
+        },
+        "participants": ["external.shared@example.com"],
+        "transcript": {
+            "id": "transcript-team-shared-links-1",
+            "text": "Agendar reunion semanal del equipo.",
+        },
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{lead_user_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 2
+    assert len(captured_calls) == 2
+    expected_attendees = sorted(
+        [
+            "external.shared@example.com",
+            "lead.shared@example.com",
+            "member.shared@example.com",
+            "pending.shared@example.com",
+        ],
+    )
+    for call in captured_calls:
+        assert call["attendees"] == expected_attendees
+    assert any(
+        call["google"] == "lead-google-token" and call["outlook"] == "lead-outlook-token"
+        for call in captured_calls
+    )
+    assert any(
+        call["google"] == "member-google-token" and call["outlook"] == "member-outlook-token"
+        for call in captured_calls
+    )
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-team-shared-links-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["google_calendar_created_count"] == 1
+    assert action_items_sync["outlook_calendar_created_count"] == 1
+    items = action_items_sync["items"]
+    lead_item = next(item for item in items if item["target_user_id"] == lead_user_id)
+    member_item = next(item for item in items if item["target_user_id"] == member_user_id)
+    assert lead_item["google_meet_link"] == "https://meet.google.com/shared-team-link"
+    assert member_item["google_meet_link"] == "https://meet.google.com/shared-team-link"
+    assert lead_item["outlook_teams_link"] == "https://teams.live.com/meet/shared-team-link"
+    assert member_item["outlook_teams_link"] == "https://teams.live.com/meet/shared-team-link"
+    assert member_item["google_calendar_status"] == "shared_from_team_event"
+    assert member_item["outlook_calendar_status"] == "shared_from_team_event"
+
+
+def test_user_scoped_webhook_skips_when_lead_disabled_team_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.disabled@example.com",
+        full_name="Lead Disabled",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.disabled@example.com",
+        full_name="Member Disabled",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-disabled-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-disabled-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo Deshabilitado",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id, member_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+    team_store.set_membership_activation(
+        team_id=team_id,
+        user_id=lead_user_id,
+        is_active=False,
+    )
+
+    calls = {"sync": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        calls["sync"] += 1
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-lead-disabled-team-1",
+            "platform": "google_meet",
+        },
+        "participants": ["external.disabled@example.com"],
+        "transcript": {
+            "id": "transcript-lead-disabled-team-1",
+            "text": "No debe crear notas por equipo deshabilitado.",
+        },
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{lead_user_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "skipped_no_active_team_recipients"
+    assert response_payload["action_items_created_count"] == 0
+    assert calls["sync"] == 0
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-lead-disabled-team-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["routed_via_team_memberships"] is True
+    assert action_items_sync["matched_team_ids"] == [team_id]
+    assert action_items_sync["target_users"] == []
+    assert action_items_sync["created_count"] == 0
+
+
+def test_user_scoped_read_ai_webhook_routes_to_lead_and_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.readai@example.com",
+        full_name="Lead Read AI",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.readai@example.com",
+        full_name="Member Read AI",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-readai-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-readai-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo Read AI",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+
+    captured_notion_tokens: list[str] = []
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        assert meeting_id == "meeting-read-ai-team-routing-1"
+        assert transcript_text == "Resumen Read AI para el equipo."
+        assert participant_emails == ["external.readai@example.com"]
+        captured_notion_tokens.append(self.settings.notion_api_token)
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event_type": "meeting.completed",
+        "meeting": {"external_id": "meeting-read-ai-team-routing-1"},
+        "participants": [{"email": "external.readai@example.com"}],
+        "summary": {"transcript": "Resumen Read AI para el equipo."},
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/read-ai/{lead_user_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 2
+    assert sorted(captured_notion_tokens) == [
+        "lead-readai-notion-token",
+        "member-readai-notion-token",
+    ]
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-read-ai-team-routing-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["routed_via_team_memberships"] is True
+    assert action_items_sync["matched_team_ids"] == [team_id]
+    assert len(action_items_sync["target_users"]) == 2
+    assert action_items_sync["created_count"] == 2
+
+
+def test_fireflies_webhook_infers_second_participant_from_speakers_when_email_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    user = user_store.create_user(
+        email="adcamargo10@gmail.com",
+        full_name="Angel Camargo",
+        password_hash="hashed",
+        role="user",
+    )
+    user_store.upsert_user_settings_values(
+        str(user["_id"]),
+        {"FIREFLIES_API_KEY": "fake-api-key"},
+    )
+
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        fireflies_client: object | None = None,
+    ) -> dict[str, object]:
+        assert meeting_id == "meeting-speaker-fallback-1"
+        assert fireflies_client is not None
+        return {
+            "id": "meeting-speaker-fallback-1",
+            "meeting_link": "https://meet.google.com/hbj-rkbt-hgp",
+            "organizer_email": "adcamargo10@gmail.com",
+            "participants": ["adcamargo10@gmail.com"],
+            "fireflies_users": ["adcamargo10@gmail.com"],
+            "meeting_attendees": [],
+            "sentences": [
+                {
+                    "index": 0,
+                    "speaker_name": "Angel Camargo",
+                    "speaker_id": 0,
+                    "text": "Primera frase",
+                },
+                {
+                    "index": 1,
+                    "speaker_name": "Cesar A Leon",
+                    "speaker_id": 1,
+                    "text": "Segunda frase",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(TranscriptionService, "_fetch_fireflies_transcript", fake_fetch)
+
+    payload = {
+        "meetingId": "meeting-speaker-fallback-1",
+        "eventType": "Transcription completed",
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{user['_id']}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-speaker-fallback-1")
+    assert lookup_response.status_code == 200
+    record = lookup_response.json()
+    assert record["participant_emails"] == ["adcamargo10@gmail.com"]
+    assert record["participants"] == [
+        {
+            "name": "Angel Camargo",
+            "email": "adcamargo10@gmail.com",
+            "external_id": "0",
+            "role": "organizer",
+        },
+        {
+            "name": "Cesar A Leon",
+            "email": None,
+            "external_id": "1",
+            "role": "speaker",
+        },
+    ]

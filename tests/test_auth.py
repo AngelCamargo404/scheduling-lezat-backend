@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.main import app
+from app.services.team_membership_store import clear_team_membership_store_cache
 from app.services.user_store import clear_user_store_cache
 
 
@@ -11,9 +12,11 @@ def reset_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_DATA_STORE", "memory")
 
     clear_user_store_cache()
+    clear_team_membership_store_cache()
     get_settings.cache_clear()
     yield
     clear_user_store_cache()
+    clear_team_membership_store_cache()
     get_settings.cache_clear()
 
 

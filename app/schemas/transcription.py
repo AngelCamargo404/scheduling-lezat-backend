@@ -37,6 +37,13 @@ class TranscriptionSentence(BaseModel):
     end_time: float | None = None
 
 
+class TranscriptionParticipant(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    external_id: str | None = None
+    role: str | None = None
+
+
 class TranscriptionRecord(BaseModel):
     id: str
     provider: TranscriptionProvider
@@ -49,6 +56,7 @@ class TranscriptionRecord(BaseModel):
     transcript_text_available: bool
     transcript_text: str | None = None
     transcript_sentences: list[TranscriptionSentence] = Field(default_factory=list)
+    participants: list[TranscriptionParticipant] = Field(default_factory=list)
     participant_emails: list[str] = Field(default_factory=list)
     enrichment_status: str | None = None
     enrichment_error: str | None = None

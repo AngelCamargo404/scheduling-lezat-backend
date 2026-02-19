@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.main import app
+from app.services.team_membership_store import clear_team_membership_store_cache
 from app.services.user_store import clear_user_store_cache, create_user_store
 
 
@@ -15,6 +16,9 @@ def reset_auth_and_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOTION_CLIENT_ID", "")
     monkeypatch.setenv("NOTION_CLIENT_SECRET", "")
     monkeypatch.setenv("NOTION_REDIRECT_URI", "")
+    monkeypatch.setenv("MONDAY_CLIENT_ID", "")
+    monkeypatch.setenv("MONDAY_CLIENT_SECRET", "")
+    monkeypatch.setenv("MONDAY_REDIRECT_URI", "")
     monkeypatch.setenv("GOOGLE_CALENDAR_CLIENT_ID", "")
     monkeypatch.setenv("GOOGLE_CALENDAR_CLIENT_SECRET", "")
     monkeypatch.setenv("GOOGLE_CALENDAR_REDIRECT_URI", "")
@@ -24,9 +28,11 @@ def reset_auth_and_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUTLOOK_REDIRECT_URI", "")
 
     clear_user_store_cache()
+    clear_team_membership_store_cache()
     get_settings.cache_clear()
     yield
     clear_user_store_cache()
+    clear_team_membership_store_cache()
     get_settings.cache_clear()
 
 
@@ -137,6 +143,14 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     )
     assert notion_redirect_field["configured"] is True
     assert notion_redirect_field["value"] == "http://localhost:8000/api/integrations/notion/callback"
+    oauth_outlook_group = next(group for group in payload["groups"] if group["id"] == "oauth_outlook")
+    outlook_timezone_field = next(
+        field
+        for field in oauth_outlook_group["fields"]
+        if field["env_var"] == "OUTLOOK_CALENDAR_EVENT_TIMEZONE"
+    )
+    assert outlook_timezone_field["configured"] is True
+    assert outlook_timezone_field["value"] == "UTC"
 
 
 def test_integrations_settings_patch_updates_only_current_user(client: TestClient) -> None:
@@ -246,6 +260,63 @@ def test_integrations_settings_patch_normalizes_transcription_autosync_toggle(
     assert autosync_field["value"] == "false"
 
 
+def test_integrations_settings_patch_blocks_project_level_google_oauth_values(
+    client: TestClient,
+) -> None:
+    token = _login_admin(client)
+
+    response = client.patch(
+        "/api/integrations/settings",
+        json={"values": {"GOOGLE_CALENDAR_REDIRECT_URI": "http://localhost:9999/callback"}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+    assert "managed at project level" in response.json()["detail"]
+
+
+def test_google_calendar_connect_uses_project_oauth_values_even_with_user_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setenv("GOOGLE_CALENDAR_CLIENT_ID", "google-client-id")
+    monkeypatch.setenv("GOOGLE_CALENDAR_CLIENT_SECRET", "google-client-secret")
+    monkeypatch.setenv(
+        "GOOGLE_CALENDAR_REDIRECT_URI",
+        "http://localhost:8000/api/integrations/google-calendar/callback",
+    )
+    clear_user_store_cache()
+    get_settings.cache_clear()
+
+    token = _login_admin(client)
+    user_store = create_user_store(get_settings())
+    admin_user = user_store.get_user_by_email("admin")
+    assert admin_user is not None
+    user_store.upsert_user_settings_values(
+        str(admin_user["_id"]),
+        {
+            "GOOGLE_CALENDAR_CLIENT_ID": "user-client-id",
+            "GOOGLE_CALENDAR_CLIENT_SECRET": "user-client-secret",
+            "GOOGLE_CALENDAR_REDIRECT_URI": "http://localhost:9999/invalid/callback",
+        },
+    )
+
+    response = client.get(
+        "/api/integrations/google-calendar/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    location = response.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert query.get("client_id") == ["google-client-id"]
+    assert query.get("redirect_uri") == [
+        "http://localhost:8000/api/integrations/google-calendar/callback"
+    ]
+
+
 def test_google_calendar_connect_redirects_to_google_oauth(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
@@ -312,6 +383,10 @@ def test_google_calendar_callback_stores_access_token_per_user(
         "app.api.routes.integrations.urlopen",
         lambda request, timeout=15: _MockGoogleTokenResponse(),
     )
+    monkeypatch.setattr(
+        "app.api.routes.integrations._fetch_google_calendar_timezone",
+        lambda access_token: "America/Mexico_City",
+    )
 
     callback_response = client.get(
         f"/api/integrations/google-calendar/callback?code=test-code&state={state}",
@@ -335,6 +410,7 @@ def test_google_calendar_callback_stores_access_token_per_user(
     user_values = user_store.get_user_settings_values(str(user_record["_id"]))
     assert user_values["GOOGLE_CALENDAR_API_TOKEN"] == "google-access-token"
     assert user_values["GOOGLE_CALENDAR_REFRESH_TOKEN"] == "google-refresh-token"
+    assert user_values["GOOGLE_CALENDAR_EVENT_TIMEZONE"] == "America/Mexico_City"
 
 
 def test_notion_connect_redirects_to_notion_oauth(
@@ -421,6 +497,98 @@ def test_notion_callback_stores_access_token_per_user(
     assert status_response.json()["credentials"]["notion_api_token_configured"] is True
 
 
+def test_monday_connect_redirects_to_monday_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setenv("MONDAY_CLIENT_ID", "monday-client-id")
+    monkeypatch.setenv("MONDAY_CLIENT_SECRET", "monday-client-secret")
+    monkeypatch.setenv(
+        "MONDAY_REDIRECT_URI",
+        "http://localhost:8000/api/integrations/monday/callback",
+    )
+    clear_user_store_cache()
+    get_settings.cache_clear()
+
+    token = _login_admin(client)
+    response = client.get(
+        "/api/integrations/monday/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert location.startswith("https://auth.monday.com/oauth2/authorize?")
+    assert "client_id=monday-client-id" in location
+    assert "scope=boards%3Aread+boards%3Awrite+users%3Aread" in location
+
+
+def test_monday_callback_stores_access_token_per_user(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setenv("MONDAY_CLIENT_ID", "monday-client-id")
+    monkeypatch.setenv("MONDAY_CLIENT_SECRET", "monday-client-secret")
+    monkeypatch.setenv(
+        "MONDAY_REDIRECT_URI",
+        "http://localhost:8000/api/integrations/monday/callback",
+    )
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:3000")
+    clear_user_store_cache()
+    get_settings.cache_clear()
+
+    token = _login_admin(client)
+    connect_response = client.get(
+        "/api/integrations/monday/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        follow_redirects=False,
+    )
+    assert connect_response.status_code == 302
+    monday_url = urlparse(connect_response.headers["location"])
+    query = parse_qs(monday_url.query)
+    state = query["state"][0]
+
+    class _MockMondayTokenResponse:
+        def __enter__(self) -> "_MockMondayTokenResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+            return False
+
+        def read(self) -> bytes:
+            return b'{"access_token":"monday-access-token"}'
+
+    monkeypatch.setattr(
+        "app.api.routes.integrations.urlopen",
+        lambda request, timeout=15: _MockMondayTokenResponse(),
+    )
+
+    callback_response = client.get(
+        f"/api/integrations/monday/callback?code=test-code&state={state}",
+        follow_redirects=False,
+    )
+    assert callback_response.status_code == 302
+    assert callback_response.headers["location"].startswith(
+        "http://localhost:3000/configuracion?monday_oauth=success",
+    )
+
+    status_response = client.get(
+        "/api/integrations/status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["credentials"]["monday_api_token_configured"] is True
+    assert status_payload["pipelines"]["monday_notes_creation"]["ready"] is False
+
+    user_store = create_user_store(get_settings())
+    user_record = user_store.get_user_by_email("admin")
+    assert user_record is not None
+    user_values = user_store.get_user_settings_values(str(user_record["_id"]))
+    assert user_values["MONDAY_API_TOKEN"] == "monday-access-token"
+
+
 def test_outlook_calendar_connect_redirects_to_microsoft_oauth(
     monkeypatch: pytest.MonkeyPatch,
     client: TestClient,
@@ -486,11 +654,15 @@ def test_outlook_calendar_callback_stores_access_token_per_user(
             return False
 
         def read(self) -> bytes:
-            return b'{"access_token":"outlook-access-token"}'
+            return b'{"access_token":"outlook-access-token","refresh_token":"outlook-refresh-token"}'
 
     monkeypatch.setattr(
         "app.api.routes.integrations.urlopen",
         lambda request, timeout=15: _MockOutlookTokenResponse(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.integrations._fetch_outlook_calendar_timezone",
+        lambda access_token: "Pacific Standard Time",
     )
 
     callback_response = client.get(
@@ -508,3 +680,12 @@ def test_outlook_calendar_callback_stores_access_token_per_user(
     )
     assert status_response.status_code == 200
     assert status_response.json()["credentials"]["outlook_calendar_api_token_configured"] is True
+
+    user_store = create_user_store(get_settings())
+    admin_user = user_store.get_user_by_email("admin")
+    assert admin_user is not None
+    user_settings = user_store.get_user_settings_values(str(admin_user["_id"]))
+    assert user_settings["OUTLOOK_CALENDAR_API_TOKEN"] == "outlook-access-token"
+    assert user_settings["OUTLOOK_CALENDAR_REFRESH_TOKEN"] == "outlook-refresh-token"
+    assert user_settings["OUTLOOK_CALENDAR_EVENT_TIMEZONE"] == "Pacific Standard Time"
+

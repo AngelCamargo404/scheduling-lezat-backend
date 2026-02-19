@@ -20,6 +20,12 @@ class IntegrationCredentialStatus(BaseModel):
     outlook_client_secret_configured: bool
     outlook_tenant_id_configured: bool
     outlook_redirect_uri_configured: bool
+    monday_api_token_configured: bool
+    monday_board_id_configured: bool
+    monday_group_id_configured: bool
+    monday_client_id_configured: bool
+    monday_client_secret_configured: bool
+    monday_redirect_uri_configured: bool
 
 
 class IntegrationPipelineStatus(BaseModel):
@@ -31,9 +37,11 @@ class IntegrationPipelinesStatus(BaseModel):
     fireflies_transcript_enrichment: IntegrationPipelineStatus
     read_ai_transcript_enrichment: IntegrationPipelineStatus
     notion_notes_creation: IntegrationPipelineStatus
+    monday_notes_creation: IntegrationPipelineStatus
     google_calendar_due_date_events: IntegrationPipelineStatus
     outlook_calendar_due_date_events: IntegrationPipelineStatus
     notion_oauth_connection: IntegrationPipelineStatus
+    monday_oauth_connection: IntegrationPipelineStatus
     google_calendar_oauth_connection: IntegrationPipelineStatus
     outlook_oauth_connection: IntegrationPipelineStatus
 

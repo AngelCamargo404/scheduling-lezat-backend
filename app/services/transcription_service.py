@@ -10,6 +10,7 @@ from fastapi import HTTPException, status
 from app.core.config import Settings
 from app.schemas.transcription import (
     TranscriptionBackfillResponse,
+    TranscriptionParticipant,
     TranscriptionProvider,
     TranscriptionRecord,
     TranscriptionRecordsResponse,
@@ -28,6 +29,7 @@ from app.services.action_item_sync_service import (
 )
 from app.services.fireflies_api_client import FirefliesApiClient, FirefliesApiError
 from app.services.read_ai_api_client import ReadAiApiClient, ReadAiApiError
+from app.services.team_membership_service import TeamMembershipService
 from app.services.transcription_store import (
     TranscriptionStore,
     build_transcription_document,
@@ -46,6 +48,7 @@ class TranscriptionService:
         action_item_sync_service: ActionItemSyncService | None = None,
         action_item_creation_store: ActionItemCreationStore | None = None,
         user_store: UserStore | None = None,
+        team_membership_service: TeamMembershipService | None = None,
     ) -> None:
         self.settings = settings
         self.store = store or create_transcription_store(
@@ -71,6 +74,8 @@ class TranscriptionService:
         self._has_custom_action_item_sync_service = action_item_sync_service is not None
         self._user_store = user_store
         self._user_store_lookup_failed = False
+        self._team_membership_service = team_membership_service
+        self._team_membership_service_lookup_failed = False
 
     def process_webhook(
         self,
@@ -223,43 +228,52 @@ class TranscriptionService:
             )
 
         transcript_sentences: list[dict[str, Any]] = []
+        participants: list[dict[str, Any]] = []
         participant_emails: list[str] = []
 
         if fireflies_transcript:
             transcript_sentences = extract_sentences_for_action_items(fireflies_transcript)
-            participant_emails = self._extract_participant_emails(fireflies_transcript)
+            participants = self._extract_fireflies_participants(fireflies_transcript)
         elif read_ai_transcript:
             read_ai_sentences_objs = self._extract_read_ai_sentences(read_ai_transcript)
             transcript_sentences = [
                 {
-                    "text": s.text, 
-                    "speaker_name": s.speaker_name, 
-                    "start_time": s.start_time
-                } 
+                    "text": s.text,
+                    "speaker_name": s.speaker_name,
+                    "start_time": s.start_time,
+                }
                 for s in read_ai_sentences_objs
             ]
-            participant_emails = self._extract_read_ai_participant_emails(read_ai_transcript)
+            participants = self._extract_read_ai_participants(read_ai_transcript)
         elif provider == TranscriptionProvider.read_ai:
-             read_ai_sentences_objs = self._extract_read_ai_sentences(payload)
-             transcript_sentences = [
+            read_ai_sentences_objs = self._extract_read_ai_sentences(payload)
+            transcript_sentences = [
                 {
-                    "text": s.text, 
-                    "speaker_name": s.speaker_name, 
-                    "start_time": s.start_time
-                } 
+                    "text": s.text,
+                    "speaker_name": s.speaker_name,
+                    "start_time": s.start_time,
+                }
                 for s in read_ai_sentences_objs
             ]
-             participant_emails = self._extract_read_ai_participant_emails(payload)
+            participants = self._extract_read_ai_participants(payload)
 
+        if not participants:
+            participants = self._extract_participants_from_payload(payload)
+        if not participants:
+            participants = self._extract_participants_from_sentences(transcript_sentences)
+
+        participant_emails = self._extract_participant_emails_from_participants(participants)
         if not participant_emails:
             participant_emails = self._extract_participant_emails_from_payload(payload)
+        if participant_emails and not participants:
+            participants = self._build_participants_from_emails(participant_emails)
+        participant_emails = sanitize_action_item_participants(participant_emails)
 
-        action_items_sync = self._sync_action_items(
+        action_items_sync = self._sync_action_items_with_team_routing(
             meeting_id=meeting_id,
             transcript_text=transcript_text,
             transcript_sentences=transcript_sentences,
             participant_emails=participant_emails,
-            resolve_user_settings=True,
             user_settings_user_id=user_settings_user_id,
         )
 
@@ -281,6 +295,8 @@ class TranscriptionService:
             ingestion_key=ingestion_key,
             enrichment_status=enrichment_status,
             enrichment_error=enrichment_error,
+            participants=participants,
+            participant_emails=participant_emails,
             action_items_sync=action_items_sync,
             fireflies_transcript=fireflies_transcript,
             read_ai_transcript=read_ai_transcript,
@@ -399,15 +415,19 @@ class TranscriptionService:
             meeting_url=meeting_url,
         )
         transcript_sentences = extract_sentences_for_action_items(fireflies_transcript)
-        participant_emails = sanitize_action_item_participants(
-            self._extract_participant_emails(fireflies_transcript),
-        )
-        action_items_sync = self._sync_action_items(
+        participants = self._extract_fireflies_participants(fireflies_transcript)
+        participant_emails = self._extract_participant_emails_from_participants(participants)
+        if not participant_emails:
+            participant_emails = sanitize_action_item_participants(
+                self._extract_participant_emails(fireflies_transcript),
+            )
+        if participant_emails and not participants:
+            participants = self._build_participants_from_emails(participant_emails)
+        action_items_sync = self._sync_action_items_with_team_routing(
             meeting_id=meeting_id,
             transcript_text=transcript_text,
             transcript_sentences=transcript_sentences,
             participant_emails=participant_emails,
-            resolve_user_settings=True,
         )
         meeting_platform = self._to_text(current_record.get("meeting_platform"))
         if not meeting_platform:
@@ -420,6 +440,8 @@ class TranscriptionService:
             "transcript_text": transcript_text,
             "enrichment_status": enrichment_status,
             "enrichment_error": enrichment_error,
+            "participants": participants,
+            "participant_emails": participant_emails,
             "action_items_sync": action_items_sync,
             "fireflies_transcript": fireflies_transcript,
             "updated_at": datetime.now(UTC),
@@ -833,22 +855,15 @@ class TranscriptionService:
 
     def _extract_read_ai_participant_emails(
         self,
-         read_ai_transcript: Mapping[str, Any] | None,
+        read_ai_transcript: Mapping[str, Any] | None,
     ) -> list[str]:
         if not read_ai_transcript:
             return []
-        
-        emails: set[str] = set()
-        participants = read_ai_transcript.get("participants")
-        if isinstance(participants, list):
-            for p in participants:
-                if isinstance(p, Mapping):
-                    email = self._to_text(p.get("email"))
-                    if email and "@" in email:
-                        emails.add(email.lower())
-                elif isinstance(p, str) and "@" in p:
-                     emails.add(p.strip().lower())
-        return list(emails)
+
+        participants = self._extract_read_ai_participants(read_ai_transcript)
+        if participants:
+            return self._extract_participant_emails_from_participants(participants)
+        return []
 
     def _create_read_ai_client(self) -> ReadAiApiClient | None:
         if not self.settings.read_ai_api_key:
@@ -863,21 +878,42 @@ class TranscriptionService:
     def _map_record(self, record: Mapping[str, Any]) -> TranscriptionRecord:
         raw_fireflies_transcript = self._to_mapping(record.get("fireflies_transcript"))
         raw_read_ai_transcript = self._to_mapping(record.get("read_ai_transcript"))
-        
-        # Determine sentences source
-        sentences = []
-        if raw_fireflies_transcript:
-             sentences = self._extract_transcription_sentences(raw_fireflies_transcript)
-        elif raw_read_ai_transcript:
-             sentences = self._extract_read_ai_sentences(raw_read_ai_transcript)
+        raw_payload = self._to_mapping(record.get("raw_payload")) or {}
 
-        # Determine participant emails source
-        participant_emails = []
+        sentences: list[TranscriptionSentence] = []
         if raw_fireflies_transcript:
+            sentences = self._extract_transcription_sentences(raw_fireflies_transcript)
+        elif raw_read_ai_transcript:
+            sentences = self._extract_read_ai_sentences(raw_read_ai_transcript)
+
+        participants = self._normalize_participants(record.get("participants"))
+        if not participants and raw_fireflies_transcript:
+            participants = self._extract_fireflies_participants(raw_fireflies_transcript)
+        if not participants and raw_read_ai_transcript:
+            participants = self._extract_read_ai_participants(raw_read_ai_transcript)
+        if not participants:
+            participants = self._extract_participants_from_payload(record)
+        if not participants:
+            participants = self._extract_participants_from_payload(raw_payload)
+        if not participants:
+            participants = self._extract_participants_from_sentence_objects(sentences)
+
+        participant_emails = sanitize_action_item_participants(
+            self._extract_string_values(record.get("participant_emails")),
+        )
+        if not participant_emails:
+            participant_emails = self._extract_participant_emails_from_participants(participants)
+        if not participant_emails and raw_fireflies_transcript:
             participant_emails = self._extract_participant_emails(raw_fireflies_transcript)
-        elif raw_read_ai_transcript:
+        if not participant_emails and raw_read_ai_transcript:
             participant_emails = self._extract_read_ai_participant_emails(raw_read_ai_transcript)
+        if not participant_emails and raw_payload:
+            participant_emails = self._extract_participant_emails_from_payload(raw_payload)
 
+        participant_models = [
+            TranscriptionParticipant.model_validate(participant)
+            for participant in participants
+        ]
         return TranscriptionRecord(
             id=str(record.get("_id", "")),
             provider=TranscriptionProvider(str(record.get("provider", "fireflies"))),
@@ -890,13 +926,14 @@ class TranscriptionService:
             transcript_text_available=bool(record.get("transcript_text_available", False)),
             transcript_text=self._to_text(record.get("transcript_text")),
             transcript_sentences=sentences,
+            participants=participant_models,
             participant_emails=participant_emails,
             enrichment_status=self._to_text(record.get("enrichment_status")),
             enrichment_error=self._to_text(record.get("enrichment_error")),
             action_items_sync=self._to_mapping(record.get("action_items_sync")),
             fireflies_transcript=raw_fireflies_transcript,
             read_ai_transcript=raw_read_ai_transcript,
-            raw_payload=dict(record.get("raw_payload", {})),
+            raw_payload=raw_payload,
             received_at=self._to_datetime(record.get("received_at")),
         )
 
@@ -909,6 +946,11 @@ class TranscriptionService:
         participant_emails: list[str],
         resolve_user_settings: bool = False,
         user_settings_user_id: str | None = None,
+        calendar_attendee_emails: list[str] | None = None,
+        force_disable_google_calendar: bool = False,
+        force_disable_outlook_calendar: bool = False,
+        skip_google_meeting_items: bool = False,
+        skip_outlook_meeting_items: bool = False,
     ) -> dict[str, Any]:
         if not self.action_item_sync_service:
             return {
@@ -929,6 +971,9 @@ class TranscriptionService:
                     "status": "skipped_missing_forced_user_settings",
                     "extracted_count": 0,
                     "created_count": 0,
+                    "monday_status": "not_required_missing_forced_user_settings",
+                    "monday_created_count": 0,
+                    "monday_error": None,
                     "google_calendar_status": "not_required_missing_forced_user_settings",
                     "google_calendar_created_count": 0,
                     "google_calendar_error": None,
@@ -948,12 +993,31 @@ class TranscriptionService:
                 effective_settings = self._resolve_settings_for_participants(
                     sanitized_participants,
                 )
+            if force_disable_google_calendar:
+                effective_settings = self._override_settings(
+                    effective_settings,
+                    {
+                        "google_calendar_api_token": "",
+                        "google_calendar_refresh_token": "",
+                    },
+                )
+            if force_disable_outlook_calendar:
+                effective_settings = self._override_settings(
+                    effective_settings,
+                    {
+                        "outlook_calendar_api_token": "",
+                        "outlook_calendar_refresh_token": "",
+                    },
+                )
             sync_service = ActionItemSyncService(effective_settings)
         if not effective_settings.transcription_autosync_enabled:
             return {
                 "status": "skipped_disabled_by_user",
                 "extracted_count": 0,
                 "created_count": 0,
+                "monday_status": "not_required_disabled_by_user",
+                "monday_created_count": 0,
+                "monday_error": None,
                 "google_calendar_status": "not_required_disabled_by_user",
                 "google_calendar_created_count": 0,
                 "google_calendar_error": None,
@@ -968,21 +1032,677 @@ class TranscriptionService:
             }
 
         try:
-            return sync_service.sync(
-                meeting_id=meeting_id,
-                transcript_text=transcript_text,
-                transcript_sentences=transcript_sentences,
-                participant_emails=sanitized_participants,
-            )
+            sync_kwargs: dict[str, Any] = {
+                "meeting_id": meeting_id,
+                "transcript_text": transcript_text,
+                "transcript_sentences": transcript_sentences,
+                "participant_emails": sanitized_participants,
+            }
+            if calendar_attendee_emails is not None:
+                sync_kwargs["calendar_attendee_emails"] = sanitize_action_item_participants(
+                    calendar_attendee_emails,
+                )
+            if skip_google_meeting_items:
+                sync_kwargs["skip_google_meeting_items"] = True
+            if skip_outlook_meeting_items:
+                sync_kwargs["skip_outlook_meeting_items"] = True
+            return sync_service.sync(**sync_kwargs)
+        except TypeError as exc:
+            error_message = str(exc)
+            removed_any_kwarg = False
+            if "skip_google_meeting_items" in error_message:
+                sync_kwargs.pop("skip_google_meeting_items", None)
+                removed_any_kwarg = True
+            if "skip_outlook_meeting_items" in error_message:
+                sync_kwargs.pop("skip_outlook_meeting_items", None)
+                removed_any_kwarg = True
+            if removed_any_kwarg:
+                try:
+                    return sync_service.sync(**sync_kwargs)
+                except Exception as retry_exc:
+                    return {
+                        "status": "failed_unexpected",
+                        "extracted_count": 0,
+                        "created_count": 0,
+                        "monday_status": "not_required_no_due_dates",
+                        "monday_created_count": 0,
+                        "monday_error": None,
+                        "items": [],
+                        "error": str(retry_exc),
+                        "synced_at": datetime.now(UTC),
+                    }
+            return {
+                "status": "failed_unexpected",
+                "extracted_count": 0,
+                "created_count": 0,
+                "monday_status": "not_required_no_due_dates",
+                "monday_created_count": 0,
+                "monday_error": None,
+                "items": [],
+                "error": error_message,
+                "synced_at": datetime.now(UTC),
+            }
         except Exception as exc:
             return {
                 "status": "failed_unexpected",
                 "extracted_count": 0,
                 "created_count": 0,
+                "monday_status": "not_required_no_due_dates",
+                "monday_created_count": 0,
+                "monday_error": None,
                 "items": [],
                 "error": str(exc),
                 "synced_at": datetime.now(UTC),
             }
+
+    def _sync_action_items_with_team_routing(
+        self,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, Any]],
+        participant_emails: list[str],
+        user_settings_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_participant_emails = sanitize_action_item_participants(participant_emails)
+        target_user_ids, matched_team_ids = self._resolve_team_recipient_user_ids(
+            participant_emails=normalized_participant_emails,
+            user_settings_user_id=user_settings_user_id,
+        )
+        if not target_user_ids:
+            if matched_team_ids:
+                return {
+                    "status": "skipped_no_active_team_recipients",
+                    "extracted_count": 0,
+                    "created_count": 0,
+                    "monday_status": "not_required_no_due_dates",
+                    "monday_created_count": 0,
+                    "monday_error": None,
+                    "google_calendar_status": "not_required_no_due_dates",
+                    "google_calendar_created_count": 0,
+                    "google_calendar_error": None,
+                    "outlook_calendar_status": "not_required_no_due_dates",
+                    "outlook_calendar_created_count": 0,
+                    "outlook_calendar_error": None,
+                    "items": [],
+                    "error": None,
+                    "synced_at": datetime.now(UTC),
+                    "routed_via_team_memberships": True,
+                    "matched_team_ids": matched_team_ids,
+                    "target_users": [],
+                }
+            direct_result = self._sync_action_items(
+                meeting_id=meeting_id,
+                transcript_text=transcript_text,
+                transcript_sentences=transcript_sentences,
+                participant_emails=normalized_participant_emails,
+                resolve_user_settings=True,
+                user_settings_user_id=user_settings_user_id,
+            )
+            direct_result["routed_via_team_memberships"] = False
+            direct_result["matched_team_ids"] = []
+            direct_result["target_users"] = []
+            return direct_result
+
+        user_store = self._get_user_store()
+        per_user_results: list[dict[str, Any]] = []
+        combined_items: list[dict[str, Any]] = []
+        extracted_count = 0
+        created_count = 0
+        monday_created_count = 0
+        google_calendar_created_count = 0
+        outlook_calendar_created_count = 0
+
+        (
+            preferred_google_owner_user_id,
+            preferred_outlook_owner_user_id,
+        ) = self._resolve_team_calendar_owner_ids(
+            target_user_ids=target_user_ids,
+            preferred_user_id=user_settings_user_id,
+        )
+        ordered_target_user_ids = self._prioritize_user_ids(
+            user_ids=target_user_ids,
+            prioritized_user_ids=[
+                user_settings_user_id,
+                preferred_google_owner_user_id,
+                preferred_outlook_owner_user_id,
+            ],
+        )
+        google_owner_user_id: str | None = None
+        outlook_owner_user_id: str | None = None
+        google_owner_created_count = 0
+        outlook_owner_created_count = 0
+        calendar_attendee_emails = self._build_team_calendar_attendee_emails(
+            participant_emails=normalized_participant_emails,
+            target_user_ids=target_user_ids,
+            matched_team_ids=matched_team_ids,
+        )
+
+        raw_user_runs: list[dict[str, Any]] = []
+        shared_google_payloads: dict[str, dict[str, Any]] = {}
+        shared_outlook_payloads: dict[str, dict[str, Any]] = {}
+
+        for target_user_id in ordered_target_user_ids:
+            target_user_email: str | None = None
+            if user_store:
+                user_record = user_store.get_user_by_id(target_user_id)
+                if user_record:
+                    target_user_email = self._to_text(user_record.get("email"))
+            skip_google_meeting_items = bool(
+                google_owner_user_id and target_user_id != google_owner_user_id,
+            )
+            skip_outlook_meeting_items = bool(
+                outlook_owner_user_id and target_user_id != outlook_owner_user_id,
+            )
+            result = self._sync_action_items(
+                meeting_id=meeting_id,
+                transcript_text=transcript_text,
+                transcript_sentences=transcript_sentences,
+                participant_emails=normalized_participant_emails,
+                resolve_user_settings=True,
+                user_settings_user_id=target_user_id,
+                calendar_attendee_emails=calendar_attendee_emails,
+                skip_google_meeting_items=skip_google_meeting_items,
+                skip_outlook_meeting_items=skip_outlook_meeting_items,
+            )
+            raw_user_runs.append(
+                {
+                    "user_id": target_user_id,
+                    "user_email": target_user_email,
+                    "result": result,
+                },
+            )
+            extracted_count += self._to_int(result.get("extracted_count")) or 0
+            created_count += self._to_int(result.get("created_count")) or 0
+            monday_created_count += self._to_int(result.get("monday_created_count")) or 0
+
+            raw_items = result.get("items")
+            if not isinstance(raw_items, list):
+                continue
+            result_google_count = self._to_int(result.get("google_calendar_created_count")) or 0
+            result_outlook_count = self._to_int(result.get("outlook_calendar_created_count")) or 0
+            if result_google_count > 0 and not google_owner_user_id:
+                google_owner_user_id = target_user_id
+                google_owner_created_count = result_google_count
+                shared_google_payloads = self._build_shared_channel_payloads(
+                    items=raw_items,
+                    channel="google",
+                )
+            elif target_user_id == google_owner_user_id:
+                shared_google_payloads = self._build_shared_channel_payloads(
+                    items=raw_items,
+                    channel="google",
+                )
+            if result_outlook_count > 0 and not outlook_owner_user_id:
+                outlook_owner_user_id = target_user_id
+                outlook_owner_created_count = result_outlook_count
+                shared_outlook_payloads = self._build_shared_channel_payloads(
+                    items=raw_items,
+                    channel="outlook",
+                )
+            elif target_user_id == outlook_owner_user_id:
+                shared_outlook_payloads = self._build_shared_channel_payloads(
+                    items=raw_items,
+                    channel="outlook",
+                )
+
+        if google_owner_user_id:
+            google_calendar_created_count = google_owner_created_count
+        else:
+            google_calendar_created_count = sum(
+                self._to_int(raw_run["result"].get("google_calendar_created_count")) or 0
+                for raw_run in raw_user_runs
+            )
+        if outlook_owner_user_id:
+            outlook_calendar_created_count = outlook_owner_created_count
+        else:
+            outlook_calendar_created_count = sum(
+                self._to_int(raw_run["result"].get("outlook_calendar_created_count")) or 0
+                for raw_run in raw_user_runs
+            )
+
+        for raw_run in raw_user_runs:
+            target_user_id = self._to_text(raw_run.get("user_id"))
+            target_user_email = self._to_text(raw_run.get("user_email"))
+            result = self._to_mapping(raw_run.get("result"))
+            raw_items = result.get("items")
+            patched_items = self._apply_shared_team_calendar_payloads(
+                items=raw_items if isinstance(raw_items, list) else [],
+                shared_google_payloads=shared_google_payloads,
+                shared_outlook_payloads=shared_outlook_payloads,
+                target_user_id=target_user_id,
+                google_owner_user_id=google_owner_user_id,
+                outlook_owner_user_id=outlook_owner_user_id,
+            )
+            google_status, google_error = self._summarize_team_user_channel_status(
+                items=patched_items,
+                channel="google",
+                fallback_status=self._to_text(result.get("google_calendar_status")),
+                fallback_error=self._to_text(result.get("google_calendar_error")),
+            )
+            outlook_status, outlook_error = self._summarize_team_user_channel_status(
+                items=patched_items,
+                channel="outlook",
+                fallback_status=self._to_text(result.get("outlook_calendar_status")),
+                fallback_error=self._to_text(result.get("outlook_calendar_error")),
+            )
+            result_status = self._to_text(result.get("status")) or "unknown"
+            result_error = self._to_text(result.get("error"))
+            per_user_results.append(
+                {
+                    "user_id": target_user_id,
+                    "user_email": target_user_email,
+                    "status": result_status,
+                    "error": result_error,
+                    "created_count": self._to_int(result.get("created_count")) or 0,
+                    "extracted_count": self._to_int(result.get("extracted_count")) or 0,
+                    "monday_status": self._to_text(result.get("monday_status")),
+                    "monday_created_count": self._to_int(result.get("monday_created_count")) or 0,
+                    "monday_error": self._to_text(result.get("monday_error")),
+                    "google_calendar_status": google_status,
+                    "google_calendar_created_count": (
+                        self._to_int(result.get("google_calendar_created_count")) or 0
+                    ),
+                    "google_calendar_error": google_error,
+                    "outlook_calendar_status": outlook_status,
+                    "outlook_calendar_created_count": (
+                        self._to_int(result.get("outlook_calendar_created_count")) or 0
+                    ),
+                    "outlook_calendar_error": outlook_error,
+                },
+            )
+            for patched_item in patched_items:
+                enriched_item = dict(patched_item)
+                enriched_item["target_user_id"] = target_user_id
+                enriched_item["target_user_email"] = target_user_email
+                combined_items.append(enriched_item)
+
+        overall_status, overall_error = self._summarize_multi_user_sync_status(per_user_results)
+        (
+            monday_status,
+            monday_error,
+        ) = self._summarize_multi_user_channel_status(
+            per_user_results=per_user_results,
+            channel="monday",
+        )
+        (
+            google_calendar_status,
+            google_calendar_error,
+        ) = self._summarize_multi_user_channel_status(
+            per_user_results=per_user_results,
+            channel="google_calendar",
+        )
+        (
+            outlook_calendar_status,
+            outlook_calendar_error,
+        ) = self._summarize_multi_user_channel_status(
+            per_user_results=per_user_results,
+            channel="outlook_calendar",
+        )
+        return {
+            "status": overall_status,
+            "extracted_count": extracted_count,
+            "created_count": created_count,
+            "monday_status": monday_status,
+            "monday_created_count": monday_created_count,
+            "monday_error": monday_error,
+            "google_calendar_status": google_calendar_status,
+            "google_calendar_created_count": google_calendar_created_count,
+            "google_calendar_error": google_calendar_error,
+            "outlook_calendar_status": outlook_calendar_status,
+            "outlook_calendar_created_count": outlook_calendar_created_count,
+            "outlook_calendar_error": outlook_calendar_error,
+            "items": combined_items,
+            "error": overall_error,
+            "synced_at": datetime.now(UTC),
+            "routed_via_team_memberships": True,
+            "matched_team_ids": matched_team_ids,
+            "target_users": per_user_results,
+        }
+
+    def _resolve_team_recipient_user_ids(
+        self,
+        *,
+        participant_emails: list[str],
+        user_settings_user_id: str | None = None,
+    ) -> tuple[list[str], list[str]]:
+        team_membership_service = self._get_team_membership_service()
+        if not team_membership_service:
+            return [], []
+        try:
+            return team_membership_service.resolve_team_recipients_for_participants(
+                participant_emails=participant_emails,
+                lead_user_id=user_settings_user_id,
+            )
+        except Exception:
+            return [], []
+
+    def _summarize_multi_user_sync_status(
+        self,
+        per_user_results: list[dict[str, Any]],
+    ) -> tuple[str, str | None]:
+        if not per_user_results:
+            return "skipped_no_target_users", None
+        statuses = [
+            self._to_text(result.get("status")) or "unknown"
+            for result in per_user_results
+        ]
+        errors = [
+            self._to_text(result.get("error"))
+            for result in per_user_results
+        ]
+        has_failures = any(status_text.startswith("failed") for status_text in statuses)
+        has_partial = any(status_text == "completed_with_errors" for status_text in statuses)
+        has_success = any(status_text == "completed" for status_text in statuses)
+        has_skipped = any(status_text.startswith("skipped") for status_text in statuses)
+
+        if has_failures and not has_success and not has_partial:
+            return "failed_multi_user_sync", self._join_errors(errors)
+        if has_failures or has_partial:
+            return "completed_with_errors", self._join_errors(errors)
+        if has_success:
+            return "completed", None
+        if has_skipped:
+            unique_skips = sorted(set(statuses))
+            if len(unique_skips) == 1:
+                return unique_skips[0], self._join_errors(errors)
+            return "skipped_multi_user", self._join_errors(errors)
+        return statuses[0], self._join_errors(errors)
+
+    def _summarize_multi_user_channel_status(
+        self,
+        *,
+        per_user_results: list[dict[str, Any]],
+        channel: str,
+    ) -> tuple[str, str | None]:
+        if not per_user_results:
+            return "not_required_no_due_dates", None
+        status_key = f"{channel}_status"
+        error_key = f"{channel}_error"
+        statuses = [
+            self._to_text(result.get(status_key))
+            for result in per_user_results
+            if self._to_text(result.get(status_key))
+        ]
+        if not statuses:
+            return "not_required_no_due_dates", None
+        errors = [self._to_text(result.get(error_key)) for result in per_user_results]
+        if any(status_text == "failed_sync" for status_text in statuses):
+            return "completed_with_errors", self._join_errors(errors)
+        if any(status_text == "completed_with_errors" for status_text in statuses):
+            return "completed_with_errors", self._join_errors(errors)
+        if any(status_text == "failed" for status_text in statuses):
+            return "completed_with_errors", self._join_errors(errors)
+        if "completed" in statuses or "shared_from_team_event" in statuses:
+            return "completed", None
+        if len(set(statuses)) == 1:
+            return statuses[0], self._join_errors(errors)
+        return "mixed", self._join_errors(errors)
+
+    def _resolve_team_calendar_owner_ids(
+        self,
+        *,
+        target_user_ids: list[str],
+        preferred_user_id: str | None = None,
+    ) -> tuple[str | None, str | None]:
+        if not target_user_ids:
+            return None, None
+        normalized_preferred_user_id = (preferred_user_id or "").strip()
+        ordered_user_ids = [user_id for user_id in target_user_ids if user_id]
+        if normalized_preferred_user_id in ordered_user_ids:
+            ordered_user_ids = [
+                normalized_preferred_user_id,
+                *[
+                    user_id
+                    for user_id in ordered_user_ids
+                    if user_id != normalized_preferred_user_id
+                ],
+            ]
+        google_owner_user_id: str | None = None
+        outlook_owner_user_id: str | None = None
+        for user_id in ordered_user_ids:
+            user_settings = self._resolve_settings_for_user_id(user_id)
+            if not user_settings.transcription_autosync_enabled:
+                continue
+            if not google_owner_user_id and (
+                user_settings.google_calendar_api_token.strip()
+                or user_settings.google_calendar_refresh_token.strip()
+            ):
+                google_owner_user_id = user_id
+            if not outlook_owner_user_id and (
+                user_settings.outlook_calendar_api_token.strip()
+                or user_settings.outlook_calendar_refresh_token.strip()
+            ):
+                outlook_owner_user_id = user_id
+            if google_owner_user_id and outlook_owner_user_id:
+                break
+        return google_owner_user_id, outlook_owner_user_id
+
+    def _prioritize_user_ids(
+        self,
+        *,
+        user_ids: list[str],
+        prioritized_user_ids: list[str | None],
+    ) -> list[str]:
+        normalized_user_ids = [user_id for user_id in user_ids if user_id]
+        prioritized: list[str] = []
+        seen: set[str] = set()
+        for raw_user_id in prioritized_user_ids:
+            normalized_user_id = (raw_user_id or "").strip()
+            if not normalized_user_id:
+                continue
+            if normalized_user_id not in normalized_user_ids:
+                continue
+            if normalized_user_id in seen:
+                continue
+            seen.add(normalized_user_id)
+            prioritized.append(normalized_user_id)
+        for user_id in normalized_user_ids:
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            prioritized.append(user_id)
+        return prioritized
+
+    def _build_team_calendar_attendee_emails(
+        self,
+        *,
+        participant_emails: list[str],
+        target_user_ids: list[str],
+        matched_team_ids: list[str],
+    ) -> list[str]:
+        attendee_emails = set(sanitize_action_item_participants(participant_emails))
+        user_store = self._get_user_store()
+        if user_store:
+            for user_id in target_user_ids:
+                user_record = user_store.get_user_by_id(user_id)
+                if not user_record:
+                    continue
+                user_email = self._to_text(user_record.get("email"))
+                if user_email and "@" in user_email:
+                    attendee_emails.add(user_email.strip().lower())
+        team_membership_service = self._get_team_membership_service()
+        team_store = (
+            team_membership_service.team_store
+            if team_membership_service and hasattr(team_membership_service, "team_store")
+            else None
+        )
+        if team_store:
+            for team_id in matched_team_ids:
+                pending_invitations = team_store.list_pending_invitations_for_team(team_id)
+                for invitation in pending_invitations:
+                    invitation_status = self._to_text(invitation.get("status")) or "pending"
+                    if invitation_status != "pending":
+                        continue
+                    invited_email = self._to_text(invitation.get("invited_email"))
+                    if invited_email and "@" in invited_email:
+                        attendee_emails.add(invited_email.strip().lower())
+        return sorted(attendee_emails)
+
+    def _build_shared_channel_payloads(
+        self,
+        *,
+        items: list[Any],
+        channel: str,
+    ) -> dict[str, dict[str, Any]]:
+        payloads: dict[str, dict[str, Any]] = {}
+        for index, raw_item in enumerate(items):
+            if not isinstance(raw_item, Mapping):
+                continue
+            if not self._is_meeting_action_item(raw_item):
+                continue
+            match_key = self._build_action_item_match_key(raw_item, index)
+            if channel == "google":
+                payloads[match_key] = {
+                    "status": self._to_text(raw_item.get("google_calendar_status")),
+                    "event_id": self._to_text(raw_item.get("google_calendar_event_id")),
+                    "error": self._to_text(raw_item.get("google_calendar_error")),
+                    "meeting_link": self._to_text(raw_item.get("google_meet_link")),
+                }
+            elif channel == "outlook":
+                payloads[match_key] = {
+                    "status": self._to_text(raw_item.get("outlook_calendar_status")),
+                    "event_id": self._to_text(raw_item.get("outlook_calendar_event_id")),
+                    "error": self._to_text(raw_item.get("outlook_calendar_error")),
+                    "meeting_link": self._to_text(raw_item.get("outlook_teams_link")),
+                }
+        return payloads
+
+    def _apply_shared_team_calendar_payloads(
+        self,
+        *,
+        items: list[Any],
+        shared_google_payloads: Mapping[str, Mapping[str, Any]],
+        shared_outlook_payloads: Mapping[str, Mapping[str, Any]],
+        target_user_id: str | None,
+        google_owner_user_id: str | None,
+        outlook_owner_user_id: str | None,
+    ) -> list[dict[str, Any]]:
+        patched_items: list[dict[str, Any]] = []
+        normalized_target_user_id = (target_user_id or "").strip()
+        for index, raw_item in enumerate(items):
+            if not isinstance(raw_item, Mapping):
+                continue
+            patched_item = dict(raw_item)
+            if self._is_meeting_action_item(patched_item):
+                item_key = self._build_action_item_match_key(patched_item, index)
+                if self._item_requires_google_meet(patched_item):
+                    google_payload = shared_google_payloads.get(item_key)
+                    if google_payload:
+                        google_status = self._to_text(google_payload.get("status"))
+                        google_link = self._to_text(google_payload.get("meeting_link"))
+                        patched_item["google_calendar_event_id"] = self._to_text(
+                            google_payload.get("event_id"),
+                        )
+                        patched_item["google_meet_link"] = google_link
+                        patched_item["google_calendar_error"] = self._to_text(
+                            google_payload.get("error"),
+                        )
+                        if (
+                            google_status == "created"
+                            and google_owner_user_id
+                            and normalized_target_user_id != google_owner_user_id
+                        ):
+                            patched_item["google_calendar_status"] = "shared_from_team_event"
+                        elif google_status:
+                            patched_item["google_calendar_status"] = google_status
+                if self._item_requires_teams(patched_item):
+                    outlook_payload = shared_outlook_payloads.get(item_key)
+                    if outlook_payload:
+                        outlook_status = self._to_text(outlook_payload.get("status"))
+                        teams_link = self._to_text(outlook_payload.get("meeting_link"))
+                        patched_item["outlook_calendar_event_id"] = self._to_text(
+                            outlook_payload.get("event_id"),
+                        )
+                        patched_item["outlook_teams_link"] = teams_link
+                        patched_item["outlook_calendar_error"] = self._to_text(
+                            outlook_payload.get("error"),
+                        )
+                        if (
+                            outlook_status == "created"
+                            and outlook_owner_user_id
+                            and normalized_target_user_id != outlook_owner_user_id
+                        ):
+                            patched_item["outlook_calendar_status"] = "shared_from_team_event"
+                        elif outlook_status:
+                            patched_item["outlook_calendar_status"] = outlook_status
+            patched_items.append(patched_item)
+        return patched_items
+
+    def _summarize_team_user_channel_status(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        channel: str,
+        fallback_status: str | None,
+        fallback_error: str | None,
+    ) -> tuple[str, str | None]:
+        status_key = "google_calendar_status" if channel == "google" else "outlook_calendar_status"
+        error_key = "google_calendar_error" if channel == "google" else "outlook_calendar_error"
+        statuses = [
+            self._to_text(item.get(status_key))
+            for item in items
+            if self._to_text(item.get(status_key))
+        ]
+        errors = [
+            self._to_text(item.get(error_key))
+            for item in items
+            if self._to_text(item.get(error_key))
+        ]
+        if not statuses:
+            return fallback_status or "not_required_no_due_dates", fallback_error
+        if any(status.startswith("failed") for status in statuses):
+            return "completed_with_errors", self._join_errors(errors) or fallback_error
+        if any(status == "completed_with_errors" for status in statuses):
+            return "completed_with_errors", self._join_errors(errors) or fallback_error
+        if any(status == "shared_from_team_event" for status in statuses):
+            return "shared_from_team_event", None
+        if any(status == "created" for status in statuses):
+            return "completed", None
+        if len(set(statuses)) == 1:
+            return statuses[0], self._join_errors(errors) or fallback_error
+        return fallback_status or "mixed", self._join_errors(errors) or fallback_error
+
+    def _is_meeting_action_item(self, item: Mapping[str, Any]) -> bool:
+        platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
+        return platform in {"auto", "google_meet", "microsoft_teams"}
+
+    def _item_requires_google_meet(self, item: Mapping[str, Any]) -> bool:
+        platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
+        return platform in {"auto", "google_meet"}
+
+    def _item_requires_teams(self, item: Mapping[str, Any]) -> bool:
+        platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
+        return platform in {"auto", "microsoft_teams"}
+
+    def _build_action_item_match_key(self, item: Mapping[str, Any], index: int) -> str:
+        due_date = (self._to_text(item.get("due_date")) or "").strip().lower()
+        scheduled_start = (self._to_text(item.get("scheduled_start")) or "").strip().lower()
+        scheduled_end = (self._to_text(item.get("scheduled_end")) or "").strip().lower()
+        event_timezone = (self._to_text(item.get("event_timezone")) or "").strip().lower()
+        recurrence_rule = (self._to_text(item.get("recurrence_rule")) or "").strip().lower()
+        platform = (self._to_text(item.get("online_meeting_platform")) or "").strip().lower()
+        return (
+            f"{index}|{due_date}|{scheduled_start}|"
+            f"{scheduled_end}|{event_timezone}|{recurrence_rule}|{platform}"
+        )
+
+    def _join_errors(self, errors: list[str | None]) -> str | None:
+        normalized_errors: list[str] = []
+        seen: set[str] = set()
+        for raw_error in errors:
+            normalized_error = self._to_text(raw_error)
+            if not normalized_error:
+                continue
+            if normalized_error in seen:
+                continue
+            seen.add(normalized_error)
+            normalized_errors.append(normalized_error)
+        if not normalized_errors:
+            return None
+        if len(normalized_errors) == 1:
+            return normalized_errors[0]
+        return "; ".join(normalized_errors[:3])
 
     def _resolve_settings_for_participants(
         self,
@@ -1071,15 +1791,28 @@ class TranscriptionService:
         # del fallback a valores base (.env) y poder desactivar esta compatibilidad.
         required_fields = (
             ("FIREFLIES_API_KEY", effective_settings.fireflies_api_key),
-            ("NOTION_API_TOKEN", effective_settings.notion_api_token),
-            ("NOTION_TASKS_DATABASE_ID", effective_settings.notion_tasks_database_id),
-            ("NOTION_TASK_STATUS_PROPERTY", effective_settings.notion_task_status_property),
         )
         missing_required = [
             env_var
             for env_var, raw_value in required_fields
             if not str(raw_value).strip()
         ]
+        notion_ready = all(
+            (
+                effective_settings.notion_api_token.strip(),
+                effective_settings.notion_tasks_database_id.strip(),
+                effective_settings.notion_task_status_property.strip(),
+            ),
+        )
+        monday_ready = all(
+            (
+                effective_settings.monday_api_token.strip(),
+                effective_settings.monday_board_id.strip(),
+                effective_settings.monday_group_id.strip(),
+            ),
+        )
+        if not notion_ready and not monday_ready:
+            missing_required.append("NOTION_OR_MONDAY_OUTPUT")
         if missing_required:
             missing_list = ", ".join(missing_required)
             return (
@@ -1095,6 +1828,9 @@ class TranscriptionService:
             "READ_AI_API_KEY",
             "NOTION_API_TOKEN",
             "NOTION_TASKS_DATABASE_ID",
+            "MONDAY_API_TOKEN",
+            "MONDAY_BOARD_ID",
+            "MONDAY_GROUP_ID",
             "GOOGLE_CALENDAR_API_TOKEN",
             "GOOGLE_CALENDAR_REFRESH_TOKEN",
             "OUTLOOK_CALENDAR_API_TOKEN",
@@ -1154,6 +1890,18 @@ class TranscriptionService:
         except Exception:
             return self.settings
 
+    def _override_settings(
+        self,
+        base_settings: Settings,
+        overrides: Mapping[str, Any],
+    ) -> Settings:
+        merged_payload = base_settings.model_dump()
+        merged_payload.update(dict(overrides))
+        try:
+            return Settings.model_validate(merged_payload)
+        except Exception:
+            return base_settings
+
     def _get_user_store(self) -> UserStore | None:
         if self._user_store:
             return self._user_store
@@ -1165,6 +1913,21 @@ class TranscriptionService:
             self._user_store_lookup_failed = True
             return None
         return self._user_store
+
+    def _get_team_membership_service(self) -> TeamMembershipService | None:
+        if self._team_membership_service:
+            return self._team_membership_service
+        if self._team_membership_service_lookup_failed:
+            return None
+        try:
+            self._team_membership_service = TeamMembershipService(
+                self.settings,
+                user_store=self._get_user_store(),
+            )
+        except Exception:
+            self._team_membership_service_lookup_failed = True
+            return None
+        return self._team_membership_service
 
     def _save_action_item_creation_records(
         self,
@@ -1188,8 +1951,11 @@ class TranscriptionService:
         for item_index, raw_item in enumerate(raw_items):
             if not isinstance(raw_item, Mapping):
                 continue
-            notion_status = self._to_text(raw_item.get("status"))
-            if notion_status != "created":
+            notion_status = self._to_text(raw_item.get("notion_status")) or self._to_text(
+                raw_item.get("status"),
+            )
+            monday_status = self._to_text(raw_item.get("monday_status"))
+            if notion_status != "created" and monday_status != "created":
                 continue
             creation_records.append(
                 build_action_item_creation_record(
@@ -1223,6 +1989,354 @@ class TranscriptionService:
         if isinstance(value, Mapping):
             return dict(value)
         return None
+
+    def _extract_fireflies_participants(
+        self,
+        fireflies_transcript: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not fireflies_transcript:
+            return []
+
+        participants: list[dict[str, Any]] = []
+        for key in ("meeting_attendees", "participants", "fireflies_users"):
+            participants.extend(self._normalize_participants(fireflies_transcript.get(key)))
+
+        raw_user = fireflies_transcript.get("user")
+        if isinstance(raw_user, Mapping):
+            participants.extend(
+                self._normalize_participants(
+                    [
+                        {
+                            "email": raw_user.get("email"),
+                            "name": raw_user.get("name") or raw_user.get("displayName"),
+                        },
+                    ],
+                ),
+            )
+
+        participants.extend(
+            self._normalize_participants(
+                [
+                    {
+                        "email": fireflies_transcript.get("organizer_email"),
+                        "role": "organizer",
+                    },
+                    {
+                        "email": fireflies_transcript.get("host_email"),
+                        "role": "host",
+                    },
+                ],
+            ),
+        )
+
+        sentence_participants = self._extract_participants_from_sentence_objects(
+            self._extract_transcription_sentences(fireflies_transcript),
+        )
+        participants = self._merge_sentence_participants(
+            participants=participants,
+            sentence_participants=sentence_participants,
+        )
+        return self._deduplicate_participants(participants)
+
+    def _extract_read_ai_participants(
+        self,
+        read_ai_transcript: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not read_ai_transcript:
+            return []
+
+        participants: list[dict[str, Any]] = []
+        for key in ("participants", "attendees"):
+            participants.extend(self._normalize_participants(read_ai_transcript.get(key)))
+
+        raw_meeting = read_ai_transcript.get("meeting")
+        if isinstance(raw_meeting, Mapping):
+            participants.extend(self._normalize_participants(raw_meeting.get("participants")))
+            participants.extend(self._normalize_participants(raw_meeting.get("attendees")))
+
+        if not participants:
+            participants.extend(
+                self._extract_participants_from_sentence_objects(
+                    self._extract_read_ai_sentences(read_ai_transcript),
+                ),
+            )
+        return self._deduplicate_participants(participants)
+
+    def _extract_participants_from_payload(
+        self,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        participants: list[dict[str, Any]] = []
+        for path in (
+            "participants",
+            "attendees",
+            "meeting.participants",
+            "meeting.attendees",
+            "meeting_attendees",
+        ):
+            participants.extend(self._normalize_participants(self._extract_path(payload, path)))
+
+        participants.extend(
+            self._normalize_participants(
+                [
+                    {
+                        "email": self._extract_path(payload, "organizer_email"),
+                        "role": "organizer",
+                    },
+                    {
+                        "email": self._extract_path(payload, "host_email"),
+                        "role": "host",
+                    },
+                ],
+            ),
+        )
+        return self._deduplicate_participants(participants)
+
+    def _extract_participants_from_sentences(
+        self,
+        transcript_sentences: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        participants: list[dict[str, Any]] = []
+        for sentence in transcript_sentences:
+            if not isinstance(sentence, Mapping):
+                continue
+            participant = self._build_normalized_participant(
+                name=sentence.get("speaker_name") or sentence.get("speaker"),
+                external_id=sentence.get("speaker_id"),
+                role="speaker",
+            )
+            if participant:
+                participants.append(participant)
+        return self._deduplicate_participants(participants)
+
+    def _extract_participants_from_sentence_objects(
+        self,
+        transcript_sentences: list[TranscriptionSentence],
+    ) -> list[dict[str, Any]]:
+        participants: list[dict[str, Any]] = []
+        for sentence in transcript_sentences:
+            participant = self._build_normalized_participant(
+                name=sentence.speaker_name,
+                external_id=sentence.speaker_id,
+                role="speaker",
+            )
+            if participant:
+                participants.append(participant)
+        return self._deduplicate_participants(participants)
+
+    def _merge_sentence_participants(
+        self,
+        *,
+        participants: list[dict[str, Any]],
+        sentence_participants: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not sentence_participants:
+            return participants
+        merged_participants = [dict(participant) for participant in participants]
+
+        for sentence_participant in sentence_participants:
+            sentence_name = self._to_text(sentence_participant.get("name"))
+            sentence_external_id = self._to_text(sentence_participant.get("external_id"))
+            target_index = self._find_matching_participant_index(
+                participants=merged_participants,
+                sentence_name=sentence_name,
+                sentence_external_id=sentence_external_id,
+            )
+            if target_index is None:
+                merged_participants.append(dict(sentence_participant))
+                continue
+
+            target_participant = merged_participants[target_index]
+            for field in ("name", "email", "external_id"):
+                if target_participant.get(field):
+                    continue
+                if sentence_participant.get(field):
+                    target_participant[field] = sentence_participant[field]
+            if not target_participant.get("role") and sentence_participant.get("role"):
+                sentence_role = self._to_text(sentence_participant.get("role"))
+                target_email = self._to_text(target_participant.get("email"))
+                if sentence_role == "speaker" and target_email:
+                    continue
+                target_participant["role"] = sentence_participant["role"]
+
+        return merged_participants
+
+    def _find_matching_participant_index(
+        self,
+        *,
+        participants: list[dict[str, Any]],
+        sentence_name: str | None,
+        sentence_external_id: str | None,
+    ) -> int | None:
+        normalized_sentence_name = (sentence_name or "").strip().lower()
+        normalized_sentence_external_id = (sentence_external_id or "").strip().lower()
+        if normalized_sentence_external_id:
+            for participant_index, participant in enumerate(participants):
+                normalized_participant_external_id = (
+                    self._to_text(participant.get("external_id")) or ""
+                ).strip().lower()
+                if normalized_participant_external_id == normalized_sentence_external_id:
+                    return participant_index
+
+        if normalized_sentence_name:
+            for participant_index, participant in enumerate(participants):
+                normalized_participant_name = (self._to_text(participant.get("name")) or "").strip().lower()
+                if normalized_participant_name == normalized_sentence_name:
+                    return participant_index
+
+            user_store = self._get_user_store()
+            if user_store:
+                for participant_index, participant in enumerate(participants):
+                    participant_name = self._to_text(participant.get("name"))
+                    participant_email = self._to_text(participant.get("email"))
+                    if participant_name or not participant_email:
+                        continue
+                    user_record = user_store.get_user_by_email(participant_email)
+                    if not user_record:
+                        continue
+                    known_name = self._to_text(user_record.get("full_name"))
+                    if not known_name:
+                        continue
+                    if known_name.strip().lower() == normalized_sentence_name:
+                        return participant_index
+        return None
+
+    def _extract_participant_emails_from_participants(
+        self,
+        participants: list[Mapping[str, Any]],
+    ) -> list[str]:
+        emails: set[str] = set()
+        for participant in participants:
+            email = self._to_text(participant.get("email"))
+            if not email:
+                continue
+            normalized_email = email.lower()
+            if "@" not in normalized_email:
+                continue
+            emails.add(normalized_email)
+        return sorted(emails)
+
+    def _build_participants_from_emails(
+        self,
+        participant_emails: list[str],
+    ) -> list[dict[str, Any]]:
+        return self._normalize_participants(participant_emails)
+
+    def _extract_string_values(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[str] = []
+        for item in value:
+            text = self._to_text(item)
+            if text:
+                normalized.append(text)
+        return normalized
+
+    def _normalize_participants(self, raw_participants: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_participants, list):
+            return []
+
+        participants: list[dict[str, Any]] = []
+        for raw_participant in raw_participants:
+            participant = self._normalize_participant(raw_participant)
+            if participant:
+                participants.append(participant)
+        return self._deduplicate_participants(participants)
+
+    def _normalize_participant(self, raw_participant: Any) -> dict[str, Any] | None:
+        if isinstance(raw_participant, Mapping):
+            return self._build_normalized_participant(
+                email=(
+                    raw_participant.get("email")
+                    or raw_participant.get("mail")
+                    or raw_participant.get("user_email")
+                    or raw_participant.get("address")
+                ),
+                name=(
+                    raw_participant.get("name")
+                    or raw_participant.get("displayName")
+                    or raw_participant.get("display_name")
+                    or raw_participant.get("full_name")
+                    or raw_participant.get("user_name")
+                ),
+                external_id=(
+                    raw_participant.get("id")
+                    or raw_participant.get("participant_id")
+                    or raw_participant.get("user_id")
+                    or raw_participant.get("external_id")
+                    or raw_participant.get("uuid")
+                ),
+                role=(
+                    raw_participant.get("role")
+                    or raw_participant.get("type")
+                    or raw_participant.get("participant_type")
+                ),
+            )
+
+        participant_text = self._to_text(raw_participant)
+        if not participant_text:
+            return None
+        if "@" in participant_text:
+            return self._build_normalized_participant(email=participant_text)
+        return self._build_normalized_participant(name=participant_text)
+
+    def _build_normalized_participant(
+        self,
+        *,
+        email: Any = None,
+        name: Any = None,
+        external_id: Any = None,
+        role: Any = None,
+    ) -> dict[str, Any] | None:
+        normalized_email = self._to_text(email)
+        normalized_name = self._to_text(name)
+        normalized_external_id = self._to_text(external_id)
+        normalized_role = self._to_text(role)
+        if normalized_email:
+            normalized_email = normalized_email.lower()
+            if "@" not in normalized_email:
+                normalized_email = None
+        if not any((normalized_email, normalized_name, normalized_external_id)):
+            return None
+        return {
+            "name": normalized_name,
+            "email": normalized_email,
+            "external_id": normalized_external_id,
+            "role": normalized_role,
+        }
+
+    def _deduplicate_participants(
+        self,
+        participants: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduplicated: list[dict[str, Any]] = []
+        index_by_key: dict[str, int] = {}
+
+        for participant in participants:
+            email = self._to_text(participant.get("email"))
+            external_id = self._to_text(participant.get("external_id"))
+            name = self._to_text(participant.get("name"))
+
+            if email:
+                dedupe_key = f"email:{email.lower()}"
+            elif external_id:
+                dedupe_key = f"id:{external_id.lower()}"
+            elif name:
+                dedupe_key = f"name:{name.lower()}"
+            else:
+                continue
+
+            existing_index = index_by_key.get(dedupe_key)
+            if existing_index is None:
+                deduplicated.append(dict(participant))
+                index_by_key[dedupe_key] = len(deduplicated) - 1
+                continue
+
+            existing = deduplicated[existing_index]
+            for field in ("name", "email", "external_id", "role"):
+                if not existing.get(field) and participant.get(field):
+                    existing[field] = participant[field]
+        return deduplicated
 
     def _extract_transcription_sentences(
         self,

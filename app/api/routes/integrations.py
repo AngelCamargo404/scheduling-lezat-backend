@@ -26,6 +26,7 @@ from app.schemas.integration import (
     IntegrationSettingsGroup,
 )
 from app.services.auth_service import AuthService, require_current_user
+from app.services.monday_kanban_client import MondayKanbanClient
 from app.services.notion_kanban_client import NotionKanbanClient
 from app.services.security_utils import create_access_token, decode_access_token
 from app.services.user_store import UserStore, create_user_store
@@ -38,6 +39,9 @@ _GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _OUTLOOK_OAUTH_AUTHORIZE_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
 _OUTLOOK_OAUTH_TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+_MONDAY_OAUTH_AUTHORIZE_URL = "https://auth.monday.com/oauth2/authorize"
+_MONDAY_OAUTH_TOKEN_URL = "https://auth.monday.com/oauth2/token"
+_MONDAY_OAUTH_SCOPES = "boards:read boards:write users:read"
 _OUTLOOK_GRAPH_SCOPES = (
     "offline_access "
     "https://graph.microsoft.com/User.Read "
@@ -84,6 +88,11 @@ GROUP_DEFINITIONS = (
         description="Creacion de notas/tareas en Notion con token de integracion.",
     ),
     IntegrationSettingGroupDefinition(
+        id="monday_sync",
+        title="Monday Sync (token)",
+        description="Creacion de notas/tareas en Monday con token OAuth por usuario.",
+    ),
+    IntegrationSettingGroupDefinition(
         id="google_calendar_sync",
         title="Google Calendar Sync (token)",
         description="Creacion de eventos por fechas de entrega detectadas.",
@@ -92,6 +101,11 @@ GROUP_DEFINITIONS = (
         id="oauth_notion",
         title="OAuth Notion",
         description="Credenciales OAuth por usuario para Notion.",
+    ),
+    IntegrationSettingGroupDefinition(
+        id="oauth_monday",
+        title="OAuth Monday",
+        description="Credenciales OAuth por usuario para Monday.",
     ),
     IntegrationSettingGroupDefinition(
         id="oauth_google",
@@ -220,6 +234,78 @@ FIELD_DEFINITIONS = (
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
+        env_var="MONDAY_API_TOKEN",
+        label="Monday API Token",
+        description="Access token OAuth para crear tareas en Monday.",
+        group="monday_sync",
+        sensitive=True,
+        required_for=("monday_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_API_URL",
+        label="Monday API URL",
+        description="Endpoint GraphQL de Monday.",
+        group="monday_sync",
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_API_TIMEOUT_SECONDS",
+        label="Monday Timeout (s)",
+        description="Timeout para llamadas al API de Monday.",
+        group="monday_sync",
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_BOARD_ID",
+        label="Monday Board ID",
+        description="Board ID del kanban de tareas en Monday.",
+        group="monday_sync",
+        required_for=("monday_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_GROUP_ID",
+        label="Monday Group ID",
+        description="Group ID dentro del board donde se crean los items.",
+        group="monday_sync",
+        required_for=("monday_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_STATUS_COLUMN_ID",
+        label="Monday Status Column ID",
+        description="Column ID tipo status/dropdown para estado inicial del item.",
+        group="monday_sync",
+        required_for=("monday_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_KANBAN_TODO_STATUS",
+        label="Monday To-do Status Label",
+        description="Etiqueta de estado inicial en Monday (ejemplo: Working on it).",
+        group="monday_sync",
+        required_for=("monday_notes_creation", "google_calendar_due_date_events"),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_ASSIGNEE_COLUMN_ID",
+        label="Monday Assignee Column ID",
+        description="Column ID para asignar responsable (opcional).",
+        group="monday_sync",
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_DUE_DATE_COLUMN_ID",
+        label="Monday Due Date Column ID",
+        description="Column ID tipo date para la fecha de entrega (opcional).",
+        group="monday_sync",
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_DETAILS_COLUMN_ID",
+        label="Monday Details Column ID",
+        description="Column ID tipo text/long_text para detalles de la tarea (opcional).",
+        group="monday_sync",
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_MEETING_ID_COLUMN_ID",
+        label="Monday Meeting ID Column ID",
+        description="Column ID tipo text para guardar meeting id (opcional).",
+        group="monday_sync",
+    ),
+    IntegrationSettingFieldDefinition(
         env_var="GOOGLE_CALENDAR_API_TOKEN",
         label="Google Calendar API Token",
         description="Access token para crear eventos por due_date.",
@@ -268,6 +354,28 @@ FIELD_DEFINITIONS = (
         required_for=("notion_oauth_connection",),
     ),
     IntegrationSettingFieldDefinition(
+        env_var="MONDAY_CLIENT_ID",
+        label="Monday OAuth Client ID",
+        description="Client ID OAuth para Monday.",
+        group="oauth_monday",
+        required_for=("monday_oauth_connection",),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_CLIENT_SECRET",
+        label="Monday OAuth Client Secret",
+        description="Client secret OAuth para Monday.",
+        group="oauth_monday",
+        sensitive=True,
+        required_for=("monday_oauth_connection",),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="MONDAY_REDIRECT_URI",
+        label="Monday OAuth Redirect URI",
+        description="Redirect URI registrada en la app OAuth de Monday.",
+        group="oauth_monday",
+        required_for=("monday_oauth_connection",),
+    ),
+    IntegrationSettingFieldDefinition(
         env_var="GOOGLE_CALENDAR_CLIENT_ID",
         label="Google OAuth Client ID",
         description="Client ID OAuth para Google Calendar.",
@@ -296,6 +404,12 @@ FIELD_DEFINITIONS = (
         group="oauth_outlook",
         sensitive=True,
         required_for=("outlook_calendar_due_date_events",),
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="OUTLOOK_CALENDAR_EVENT_TIMEZONE",
+        label="Outlook Calendar Timezone",
+        description="Zona horaria por defecto para eventos creados en Outlook.",
+        group="oauth_outlook",
     ),
     IntegrationSettingFieldDefinition(
         env_var="OUTLOOK_CLIENT_ID",
@@ -359,6 +473,9 @@ PROJECT_LOCKED_ENV_VARS = frozenset(
     {
         "GEMINI_API_KEY",
         "GEMINI_MODEL",
+        "GOOGLE_CALENDAR_CLIENT_ID",
+        "GOOGLE_CALENDAR_CLIENT_SECRET",
+        "GOOGLE_CALENDAR_REDIRECT_URI",
     },
 )
 POSITIVE_FLOAT_ENV_VARS = frozenset(
@@ -366,6 +483,7 @@ POSITIVE_FLOAT_ENV_VARS = frozenset(
         "FIREFLIES_API_TIMEOUT_SECONDS",
         "GEMINI_API_TIMEOUT_SECONDS",
         "NOTION_API_TIMEOUT_SECONDS",
+        "MONDAY_API_TIMEOUT_SECONDS",
         "GOOGLE_CALENDAR_API_TIMEOUT_SECONDS",
     },
 )
@@ -373,7 +491,9 @@ POSITIVE_INT_ENV_VARS = frozenset()
 URL_ENV_VARS = frozenset(
     {
         "FIREFLIES_API_URL",
+        "MONDAY_API_URL",
         "NOTION_REDIRECT_URI",
+        "MONDAY_REDIRECT_URI",
         "GOOGLE_CALENDAR_REDIRECT_URI",
         "OUTLOOK_REDIRECT_URI",
         "FRONTEND_BASE_URL",
@@ -590,6 +710,207 @@ def get_notion_database_status_options(
     }
 
 
+@router.get("/monday/connect")
+def start_monday_oauth(
+    access_token: str | None = Query(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_HTTP_BEARER),
+) -> RedirectResponse:
+    current_user = _resolve_current_user_for_oauth(access_token, credentials)
+    settings = get_settings()
+    env_values = _read_current_user_values(current_user)
+    client_id, client_secret, redirect_uri = _resolve_monday_oauth_config(env_values, settings)
+
+    if not client_id or not client_secret or not redirect_uri:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Monday OAuth is not configured. "
+                "Define MONDAY_CLIENT_ID, MONDAY_CLIENT_SECRET and MONDAY_REDIRECT_URI."
+            ),
+        )
+
+    state_token, _ = create_access_token(
+        claims={
+            "type": "monday_oauth_state",
+            "sub": current_user.id,
+            "nonce": secrets.token_urlsafe(16),
+        },
+        secret_key=settings.auth_secret_key,
+        ttl_minutes=10,
+    )
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": _MONDAY_OAUTH_SCOPES,
+            "state": state_token,
+        },
+    )
+    return RedirectResponse(url=f"{_MONDAY_OAUTH_AUTHORIZE_URL}?{query}", status_code=302)
+
+
+@router.get("/monday/callback")
+def finish_monday_oauth(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> RedirectResponse:
+    settings = get_settings()
+    if error:
+        return _build_monday_oauth_redirect("error", error)
+    if not code or not state:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Missing code or state.",
+        )
+
+    decoded_state = decode_access_token(state, settings.auth_secret_key)
+    if not decoded_state or decoded_state.get("type") != "monday_oauth_state":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid OAuth state.",
+        )
+    user_id = str(decoded_state.get("sub", "")).strip()
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OAuth state does not include a valid user.",
+        )
+
+    user_store = _get_user_store()
+    user_record = user_store.get_user_by_id(user_id)
+    if not user_record:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found for OAuth state.",
+        )
+
+    current_user = CurrentUserResponse(
+        id=str(user_record.get("_id", "")),
+        email=str(user_record.get("email", "")),
+        full_name=str(user_record.get("full_name", "")),
+        role=str(user_record.get("role", "user")),
+    )
+    env_values = _read_current_user_values(current_user)
+    client_id, client_secret, redirect_uri = _resolve_monday_oauth_config(env_values, settings)
+    if not client_id or not client_secret or not redirect_uri:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Monday OAuth is not configured. "
+                "Define MONDAY_CLIENT_ID, MONDAY_CLIENT_SECRET and MONDAY_REDIRECT_URI."
+            ),
+        )
+
+    token_payload = _exchange_monday_code_for_token(
+        code=code,
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+    )
+    monday_access_token = str(token_payload.get("access_token", "")).strip()
+    if not monday_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Monday token response did not include access_token.",
+        )
+
+    user_store.upsert_user_settings_values(
+        user_id,
+        {"MONDAY_API_TOKEN": monday_access_token},
+    )
+    return _build_monday_oauth_redirect("success", "connected")
+
+
+@router.get("/monday/boards")
+def get_monday_accessible_boards(
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> list[dict[str, str]]:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("MONDAY_API_TOKEN", "")
+    if not token.strip():
+        return []
+
+    client = MondayKanbanClient(api_token=token)
+    try:
+        boards = client.list_accessible_boards()
+    except Exception:
+        return []
+    return [
+        {
+            "id": str(board.get("id", "")).strip(),
+            "name": str(board.get("name", "")).strip(),
+            "url": str(board.get("url", "")).strip(),
+        }
+        for board in boards
+        if str(board.get("id", "")).strip()
+    ]
+
+
+@router.get("/monday/boards/{board_id}/groups")
+def get_monday_board_groups(
+    board_id: str,
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> list[dict[str, str]]:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("MONDAY_API_TOKEN", "")
+    if not token.strip() or not board_id.strip():
+        return []
+
+    client = MondayKanbanClient(api_token=token, board_id=board_id)
+    try:
+        return client.list_board_groups(board_id=board_id)
+    except Exception:
+        return []
+
+
+@router.get("/monday/boards/{board_id}/columns")
+def get_monday_board_columns(
+    board_id: str,
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> list[dict[str, str]]:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("MONDAY_API_TOKEN", "")
+    if not token.strip() or not board_id.strip():
+        return []
+
+    client = MondayKanbanClient(api_token=token, board_id=board_id)
+    try:
+        return client.list_board_columns(board_id=board_id)
+    except Exception:
+        return []
+
+
+@router.get("/monday/boards/{board_id}/status-options")
+def get_monday_board_status_options(
+    board_id: str,
+    status_column_id: str = Query(default=""),
+    current_user: CurrentUserResponse = Depends(require_current_user),
+) -> dict[str, object]:
+    env_values = _read_current_user_values(current_user)
+    token = env_values.get("MONDAY_API_TOKEN", "")
+    if not token.strip() or not board_id.strip():
+        return {
+            "selected_column_id": status_column_id.strip() or None,
+            "options": [],
+            "available_status_columns": [],
+        }
+
+    client = MondayKanbanClient(api_token=token, board_id=board_id)
+    try:
+        return client.list_board_status_options(
+            board_id=board_id,
+            status_column_id=status_column_id,
+        )
+    except Exception:
+        return {
+            "selected_column_id": status_column_id.strip() or None,
+            "options": [],
+            "available_status_columns": [],
+        }
+
+
 @router.get("/google-calendar/connect")
 def start_google_calendar_oauth(
     access_token: str | None = Query(default=None),
@@ -707,6 +1028,9 @@ def finish_google_calendar_oauth(
         updates["GOOGLE_CALENDAR_REFRESH_TOKEN"] = google_refresh_token
     elif existing_refresh_token:
         updates["GOOGLE_CALENDAR_REFRESH_TOKEN"] = existing_refresh_token
+    google_timezone = _fetch_google_calendar_timezone(google_access_token)
+    if google_timezone:
+        updates["GOOGLE_CALENDAR_EVENT_TIMEZONE"] = google_timezone
     user_store.upsert_user_settings_values(
         user_id,
         updates,
@@ -824,10 +1148,20 @@ def finish_outlook_calendar_oauth(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Outlook token response did not include access_token.",
         )
+    outlook_refresh_token = str(token_payload.get("refresh_token", "")).strip()
+    existing_refresh_token = env_values.get("OUTLOOK_CALENDAR_REFRESH_TOKEN", "").strip()
 
+    updates = {"OUTLOOK_CALENDAR_API_TOKEN": outlook_access_token}
+    if outlook_refresh_token:
+        updates["OUTLOOK_CALENDAR_REFRESH_TOKEN"] = outlook_refresh_token
+    elif existing_refresh_token:
+        updates["OUTLOOK_CALENDAR_REFRESH_TOKEN"] = existing_refresh_token
+    outlook_timezone = _fetch_outlook_calendar_timezone(outlook_access_token)
+    if outlook_timezone:
+        updates["OUTLOOK_CALENDAR_EVENT_TIMEZONE"] = outlook_timezone
     user_store.upsert_user_settings_values(
         user_id,
-        {"OUTLOOK_CALENDAR_API_TOKEN": outlook_access_token},
+        updates,
     )
     return _build_outlook_oauth_redirect("success", "connected")
 
@@ -892,7 +1226,27 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
         outlook_client_secret_configured=is_configured("OUTLOOK_CLIENT_SECRET"),
         outlook_tenant_id_configured=is_configured("OUTLOOK_TENANT_ID"),
         outlook_redirect_uri_configured=is_configured("OUTLOOK_REDIRECT_URI"),
+        monday_api_token_configured=is_configured("MONDAY_API_TOKEN"),
+        monday_board_id_configured=is_configured("MONDAY_BOARD_ID"),
+        monday_group_id_configured=is_configured("MONDAY_GROUP_ID"),
+        monday_client_id_configured=is_configured("MONDAY_CLIENT_ID"),
+        monday_client_secret_configured=is_configured("MONDAY_CLIENT_SECRET"),
+        monday_redirect_uri_configured=is_configured("MONDAY_REDIRECT_URI"),
     )
+    notion_ready = (
+        credentials.notion_api_token_configured
+        and credentials.notion_tasks_database_id_configured
+        and is_configured("NOTION_TASK_STATUS_PROPERTY")
+        and is_configured("NOTION_KANBAN_TODO_STATUS")
+    )
+    monday_ready = (
+        credentials.monday_api_token_configured
+        and credentials.monday_board_id_configured
+        and credentials.monday_group_id_configured
+        and is_configured("MONDAY_STATUS_COLUMN_ID")
+        and is_configured("MONDAY_KANBAN_TODO_STATUS")
+    )
+    notes_output_ready = notion_ready or monday_ready
     pipelines = IntegrationPipelinesStatus(
         fireflies_transcript_enrichment=_build_pipeline_status(
             {
@@ -914,14 +1268,22 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_KANBAN_TODO_STATUS": is_configured("NOTION_KANBAN_TODO_STATUS"),
             },
         ),
+        monday_notes_creation=_build_pipeline_status(
+            {
+                "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
+                "GEMINI_API_KEY": credentials.gemini_api_key_configured,
+                "MONDAY_API_TOKEN": credentials.monday_api_token_configured,
+                "MONDAY_BOARD_ID": credentials.monday_board_id_configured,
+                "MONDAY_GROUP_ID": credentials.monday_group_id_configured,
+                "MONDAY_STATUS_COLUMN_ID": is_configured("MONDAY_STATUS_COLUMN_ID"),
+                "MONDAY_KANBAN_TODO_STATUS": is_configured("MONDAY_KANBAN_TODO_STATUS"),
+            },
+        ),
         google_calendar_due_date_events=_build_pipeline_status(
             {
                 "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
                 "GEMINI_API_KEY": credentials.gemini_api_key_configured,
-                "NOTION_API_TOKEN": credentials.notion_api_token_configured,
-                "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
-                "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
-                "NOTION_KANBAN_TODO_STATUS": is_configured("NOTION_KANBAN_TODO_STATUS"),
+                "NOTES_OUTPUT_CONFIGURED": notes_output_ready,
                 "GOOGLE_CALENDAR_API_TOKEN": credentials.google_calendar_api_token_configured,
             },
         ),
@@ -929,10 +1291,7 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
             {
                 "FIREFLIES_API_KEY": credentials.fireflies_api_key_configured,
                 "GEMINI_API_KEY": credentials.gemini_api_key_configured,
-                "NOTION_API_TOKEN": credentials.notion_api_token_configured,
-                "NOTION_TASKS_DATABASE_ID": credentials.notion_tasks_database_id_configured,
-                "NOTION_TASK_STATUS_PROPERTY": is_configured("NOTION_TASK_STATUS_PROPERTY"),
-                "NOTION_KANBAN_TODO_STATUS": is_configured("NOTION_KANBAN_TODO_STATUS"),
+                "NOTES_OUTPUT_CONFIGURED": notes_output_ready,
                 "OUTLOOK_CALENDAR_API_TOKEN": credentials.outlook_calendar_api_token_configured,
             },
         ),
@@ -941,6 +1300,13 @@ def _build_status_response(env_values: dict[str, str]) -> IntegrationsStatusResp
                 "NOTION_CLIENT_ID": credentials.notion_client_id_configured,
                 "NOTION_CLIENT_SECRET": credentials.notion_client_secret_configured,
                 "NOTION_REDIRECT_URI": credentials.notion_redirect_uri_configured,
+            },
+        ),
+        monday_oauth_connection=_build_pipeline_status(
+            {
+                "MONDAY_CLIENT_ID": credentials.monday_client_id_configured,
+                "MONDAY_CLIENT_SECRET": credentials.monday_client_secret_configured,
+                "MONDAY_REDIRECT_URI": credentials.monday_redirect_uri_configured,
             },
         ),
         google_calendar_oauth_connection=_build_pipeline_status(
@@ -1012,6 +1378,10 @@ def _read_current_user_values(current_user: CurrentUserResponse) -> dict[str, st
     # Gemini config is project-level and should not vary by user.
     values["GEMINI_API_KEY"] = settings.gemini_api_key
     values["GEMINI_MODEL"] = settings.gemini_model
+    # Google Calendar OAuth app credentials are project-level values from .env.
+    values["GOOGLE_CALENDAR_CLIENT_ID"] = settings.google_calendar_client_id
+    values["GOOGLE_CALENDAR_CLIENT_SECRET"] = settings.google_calendar_client_secret
+    values["GOOGLE_CALENDAR_REDIRECT_URI"] = settings.google_calendar_redirect_uri
     for env_var in EDITABLE_ENV_VARS:
         if env_var not in values:
             if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED":
@@ -1296,6 +1666,51 @@ def _exchange_notion_code_for_token(
     return parsed_payload
 
 
+def _exchange_monday_code_for_token(
+    *,
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+) -> dict[str, object]:
+    payload = json.dumps(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+    ).encode("utf-8")
+    request_payload = Request(
+        _MONDAY_OAUTH_TOKEN_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request_payload, timeout=15) as response:
+            raw_payload = response.read().decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to exchange Monday authorization code.",
+        ) from exc
+
+    try:
+        parsed_payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid Monday token response.",
+        ) from exc
+    if not isinstance(parsed_payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid Monday token response payload.",
+        )
+    return parsed_payload
+
+
 def _exchange_outlook_calendar_code_for_token(
     *,
     code: str,
@@ -1345,12 +1760,77 @@ def _exchange_outlook_calendar_code_for_token(
     return parsed_payload
 
 
+def _fetch_google_calendar_timezone(access_token: str) -> str | None:
+    token = access_token.strip()
+    if not token:
+        return None
+    request_payload = Request(
+        "https://www.googleapis.com/calendar/v3/users/me/settings/timezone",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request_payload, timeout=10) as response:
+            raw_payload = response.read().decode("utf-8")
+    except Exception:
+        return None
+    try:
+        parsed_payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed_payload, dict):
+        return None
+    timezone_value = str(parsed_payload.get("value", "")).strip()
+    return timezone_value or None
+
+
+def _fetch_outlook_calendar_timezone(access_token: str) -> str | None:
+    token = access_token.strip()
+    if not token:
+        return None
+    request_payload = Request(
+        "https://graph.microsoft.com/v1.0/me/mailboxSettings",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request_payload, timeout=10) as response:
+            raw_payload = response.read().decode("utf-8")
+    except Exception:
+        return None
+    try:
+        parsed_payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed_payload, dict):
+        return None
+    timezone_value = str(parsed_payload.get("timeZone", "")).strip()
+    return timezone_value or None
+
+
 def _build_notion_oauth_redirect(status_value: str, message: str) -> RedirectResponse:
     frontend_base_url = get_settings().frontend_base_url.rstrip("/")
     query = urlencode(
         {
             "notion_oauth": status_value,
             "notion_oauth_message": message,
+        },
+    )
+    return RedirectResponse(url=f"{frontend_base_url}/configuracion?{query}", status_code=302)
+
+
+def _build_monday_oauth_redirect(status_value: str, message: str) -> RedirectResponse:
+    frontend_base_url = get_settings().frontend_base_url.rstrip("/")
+    query = urlencode(
+        {
+            "monday_oauth": status_value,
+            "monday_oauth_message": message,
         },
     )
     return RedirectResponse(url=f"{frontend_base_url}/configuracion?{query}", status_code=302)
@@ -1379,21 +1859,12 @@ def _build_outlook_oauth_redirect(status_value: str, message: str) -> RedirectRe
 
 
 def _resolve_google_calendar_oauth_config(
-    env_values: dict[str, str],
+    _env_values: dict[str, str],
     settings: Settings,
 ) -> tuple[str, str, str]:
-    client_id = (
-        env_values.get("GOOGLE_CALENDAR_CLIENT_ID", "").strip()
-        or settings.google_calendar_client_id.strip()
-    )
-    client_secret = (
-        env_values.get("GOOGLE_CALENDAR_CLIENT_SECRET", "").strip()
-        or settings.google_calendar_client_secret.strip()
-    )
-    redirect_uri = (
-        env_values.get("GOOGLE_CALENDAR_REDIRECT_URI", "").strip()
-        or settings.google_calendar_redirect_uri.strip()
-    )
+    client_id = settings.google_calendar_client_id.strip()
+    client_secret = settings.google_calendar_client_secret.strip()
+    redirect_uri = settings.google_calendar_redirect_uri.strip()
     return client_id, client_secret, redirect_uri
 
 
@@ -1409,6 +1880,18 @@ def _resolve_notion_oauth_config(
     return client_id, client_secret, redirect_uri
 
 
+def _resolve_monday_oauth_config(
+    env_values: dict[str, str],
+    settings: Settings,
+) -> tuple[str, str, str]:
+    client_id = env_values.get("MONDAY_CLIENT_ID", "").strip() or settings.monday_client_id.strip()
+    client_secret = (
+        env_values.get("MONDAY_CLIENT_SECRET", "").strip() or settings.monday_client_secret.strip()
+    )
+    redirect_uri = env_values.get("MONDAY_REDIRECT_URI", "").strip() or settings.monday_redirect_uri.strip()
+    return client_id, client_secret, redirect_uri
+
+
 def _resolve_outlook_oauth_config(
     env_values: dict[str, str],
     settings: Settings,
@@ -1420,3 +1903,5 @@ def _resolve_outlook_oauth_config(
     tenant_id = env_values.get("OUTLOOK_TENANT_ID", "").strip() or settings.outlook_tenant_id.strip()
     redirect_uri = env_values.get("OUTLOOK_REDIRECT_URI", "").strip() or settings.outlook_redirect_uri.strip()
     return client_id, client_secret, tenant_id, redirect_uri
+
+

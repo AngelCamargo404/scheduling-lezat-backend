@@ -70,6 +70,7 @@ class MongoActionItemCreationStore(ActionItemCreationStore):
         self._collection.create_index([("created_at", self._desc)])
         self._collection.create_index([("meeting_id", self._desc), ("created_at", self._desc)])
         self._collection.create_index([("notion_page_id", self._desc)])
+        self._collection.create_index([("monday_item_id", self._desc)])
 
     def save_many(self, records: Sequence[Mapping[str, Any]]) -> int:
         payload = [dict(record) for record in records]
@@ -156,20 +157,31 @@ def build_action_item_creation_record(
         "client_reference_id": client_reference_id,
         "transcription_record_id": transcription_record_id,
         "action_item_index": action_item_index,
+        "target_user_id": action_item.get("target_user_id"),
+        "target_user_email": action_item.get("target_user_email"),
         "title": action_item.get("title"),
         "assignee_email": action_item.get("assignee_email"),
         "assignee_name": action_item.get("assignee_name"),
         "due_date": action_item.get("due_date"),
+        "scheduled_start": action_item.get("scheduled_start"),
+        "scheduled_end": action_item.get("scheduled_end"),
+        "recurrence_rule": action_item.get("recurrence_rule"),
+        "online_meeting_platform": action_item.get("online_meeting_platform"),
         "details": action_item.get("details"),
         "source_sentence": action_item.get("source_sentence"),
-        "notion_status": action_item.get("status"),
+        "notion_status": action_item.get("notion_status") or action_item.get("status"),
         "notion_page_id": action_item.get("notion_page_id"),
-        "notion_error": action_item.get("error"),
+        "notion_error": action_item.get("notion_error") or action_item.get("error"),
+        "monday_status": action_item.get("monday_status"),
+        "monday_item_id": action_item.get("monday_item_id"),
+        "monday_error": action_item.get("monday_error"),
         "google_calendar_status": action_item.get("google_calendar_status"),
         "google_calendar_event_id": action_item.get("google_calendar_event_id"),
+        "google_meet_link": action_item.get("google_meet_link"),
         "google_calendar_error": action_item.get("google_calendar_error"),
         "outlook_calendar_status": action_item.get("outlook_calendar_status"),
         "outlook_calendar_event_id": action_item.get("outlook_calendar_event_id"),
+        "outlook_teams_link": action_item.get("outlook_teams_link"),
         "outlook_calendar_error": action_item.get("outlook_calendar_error"),
         "participant_emails": list(participant_emails),
         "synced_at": synced_at or datetime.now(UTC),
