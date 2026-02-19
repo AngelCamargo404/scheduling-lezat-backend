@@ -605,15 +605,15 @@ class ActionItemSyncService:
 
     def _requires_google_meet_link(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform == "google_meet"
+        return platform in {"google_meet", "auto"}
 
     def _requires_teams_link(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform == "microsoft_teams"
+        return platform in {"microsoft_teams", "auto"}
 
     def _is_explicit_online_meeting(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform in {"google_meet", "microsoft_teams"}
+        return platform in {"google_meet", "microsoft_teams", "auto"}
 
     def _normalize_calendar_link(self, value: Any) -> str | None:
         if not isinstance(value, str):

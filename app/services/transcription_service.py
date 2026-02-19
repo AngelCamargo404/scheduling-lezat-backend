@@ -1706,15 +1706,15 @@ class TranscriptionService:
 
     def _is_meeting_action_item(self, item: Mapping[str, Any]) -> bool:
         platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
-        return platform in {"google_meet", "microsoft_teams"}
+        return platform in {"auto", "google_meet", "microsoft_teams"}
 
     def _item_requires_google_meet(self, item: Mapping[str, Any]) -> bool:
         platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
-        return platform == "google_meet"
+        return platform in {"auto", "google_meet"}
 
     def _item_requires_teams(self, item: Mapping[str, Any]) -> bool:
         platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
-        return platform == "microsoft_teams"
+        return platform in {"auto", "microsoft_teams"}
 
     def _build_action_item_match_key(self, item: Mapping[str, Any], index: int) -> str:
         due_date = (self._to_text(item.get("due_date")) or "").strip().lower()

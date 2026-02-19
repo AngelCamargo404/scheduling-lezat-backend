@@ -142,6 +142,12 @@ class ActionItem:
             online_meeting_platform = "auto"
         if not online_meeting_platform:
             online_meeting_platform = _infer_online_meeting_platform_from_context(payload)
+        if not online_meeting_platform and _looks_like_scheduled_meeting_request(
+            title=title,
+            details=_normalize_optional_text(payload.get("details")),
+            source_sentence=_normalize_optional_text(payload.get("source_sentence")),
+        ):
+            online_meeting_platform = "auto"
         event_timezone = _resolve_event_timezone(payload)
 
         scheduled_start = _normalize_scheduled_start(
@@ -927,6 +933,61 @@ def _infer_online_meeting_platform_from_context(payload: dict[str, Any]) -> str 
         if inferred:
             return inferred
     return None
+
+
+def _looks_like_scheduled_meeting_request(
+    *,
+    title: str,
+    details: str | None,
+    source_sentence: str | None,
+) -> bool:
+    normalized_title = _normalize_for_matching(title)
+    if not normalized_title:
+        return False
+    has_meeting_keyword = bool(
+        re.search(
+            r"\b(reunion|meeting|llamada|call|sesion|session|kickoff|demo)\b",
+            normalized_title,
+        ),
+    )
+    if not has_meeting_keyword:
+        return False
+    if re.search(
+        r"\b(resumen|minuta|notas|acuerdos|recordatorio|follow up|follow-up|seguimiento)\s+de\s+"
+        r"(la\s+)?(reunion|meeting)\b",
+        normalized_title,
+    ):
+        return False
+
+    combined_context = _normalize_for_matching(
+        " ".join(value for value in (title, details or "", source_sentence or "") if value),
+    )
+    if re.search(
+        r"\b(resumen|minuta|notas|acuerdos|recordatorio|follow up|follow-up|seguimiento)\s+de\s+"
+        r"(la\s+)?(reunion|meeting)\b",
+        combined_context,
+    ):
+        return False
+    if re.search(
+        r"\b(agendar|agenda|programar|programa|coordinar|coordina|calendarizar|organizar|"
+        r"planificar|schedule|book|set up|hacer|realizar|tener)\s+(una\s+)?"
+        r"(reunion|meeting|llamada|call|sesion|session)\b",
+        combined_context,
+    ):
+        return True
+    if re.search(
+        r"\b(hay que|tenemos que|tengo que|necesito|necesitamos|debe|deben|deberiamos)\b"
+        r".{0,80}\b(reunion|meeting|llamada|call|sesion|session)\b",
+        combined_context,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(agendar|agenda|programar|programa|coordinar|coordina|calendarizar|"
+            r"organizar|planificar|schedule|book|set up)\b",
+            combined_context,
+        ),
+    )
 
 
 def _looks_like_meeting_context(payload: dict[str, Any]) -> bool:

@@ -158,7 +158,7 @@ def test_action_item_infers_monthly_recurrence_due_date_and_teams() -> None:
     assert item.online_meeting_platform == "microsoft_teams"
 
 
-def test_action_item_does_not_force_meeting_platform_without_explicit_provider() -> None:
+def test_action_item_sets_auto_meeting_platform_when_task_is_meeting() -> None:
     item = ActionItem.from_payload(
         {
             "title": "Reunion con cliente potencial",
@@ -169,8 +169,37 @@ def test_action_item_does_not_force_meeting_platform_without_explicit_provider()
 
     assert item is not None
     assert item.due_date == "2026-03-20"
+    assert item.online_meeting_platform == "auto"
+    assert item.scheduled_start is not None
+    assert item.scheduled_start.startswith("2026-03-20T09:00:00")
+
+
+def test_action_item_keeps_non_meeting_task_without_online_platform() -> None:
+    item = ActionItem.from_payload(
+        {
+            "title": "Enviar resumen de reunion",
+            "source_sentence": "En la reunion acordamos enviar el resumen el 20 de marzo de 2026.",
+        },
+        reference_date=date(2026, 2, 13),
+    )
+
+    assert item is not None
+    assert item.due_date == "2026-03-20"
     assert item.online_meeting_platform is None
-    assert item.scheduled_start is None
+
+
+def test_action_item_does_not_set_auto_for_meeting_notes_titles() -> None:
+    item = ActionItem.from_payload(
+        {
+            "title": "Reunion semanal - enviar minuta",
+            "source_sentence": "Enviar la minuta de la reunion del 5 de marzo de 2026.",
+        },
+        reference_date=date(2026, 2, 13),
+    )
+
+    assert item is not None
+    assert item.due_date == "2026-03-05"
+    assert item.online_meeting_platform is None
 
 
 def test_action_item_infers_event_timezone_from_transcription_context() -> None:
