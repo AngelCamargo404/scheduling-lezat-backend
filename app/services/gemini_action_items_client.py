@@ -220,8 +220,8 @@ class GeminiActionItemsClient:
             "- Si hay frecuencia (todos los jueves, cada semana, cada mes, al inicio de cada mes), "
             "llena recurrence_rule usando RRULE sin prefijo RRULE: (ej. "
             "FREQ=WEEKLY;INTERVAL=1;BYDAY=TH).\n"
-            "- Si la transcripcion pide videollamada, llena online_meeting_platform con uno de: "
-            "google_meet, microsoft_teams, auto.\n"
+            "- Si la transcripcion menciona explicitamente Google Meet o Microsoft Teams, llena "
+            "online_meeting_platform con uno de: google_meet, microsoft_teams.\n"
             "- Si no aplica agenda/recurrencia/videollamada, deja esos campos en null.\n"
             "Incluye en source_sentence la frase exacta donde aparezca la tarea y/o la pista temporal.\n"
             "Devuelve un JSON con este formato exacto:\n"
@@ -236,7 +236,7 @@ class GeminiActionItemsClient:
             '      "scheduled_end": "YYYY-MM-DDTHH:MM:SS|null",\n'
             '      "event_timezone": "IANA_TIMEZONE|null",\n'
             '      "recurrence_rule": "RRULE_WITHOUT_PREFIX|null",\n'
-            '      "online_meeting_platform": "google_meet|microsoft_teams|auto|null",\n'
+            '      "online_meeting_platform": "google_meet|microsoft_teams|null",\n'
             '      "details": "string|null",\n'
             '      "source_sentence": "string|null"\n'
             "    }\n"

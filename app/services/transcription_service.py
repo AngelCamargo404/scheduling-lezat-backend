@@ -548,6 +548,47 @@ class TranscriptionService:
         provider: TranscriptionProvider,
         payload: Mapping[str, Any],
     ) -> str | None:
+        meeting_id = self._extract_first_string(
+            payload,
+            paths=(
+                "meeting.id",
+                "meeting.meeting_id",
+                "meeting.external_id",
+                "meetingId",
+                "meeting_id",
+                "session_id",
+                "uuid",
+            ),
+        )
+        transcript_id = self._extract_first_string(
+            payload,
+            paths=(
+                "transcript.id",
+                "transcript.transcript_id",
+                "transcriptId",
+                "transcript_id",
+            ),
+        )
+        client_reference_id = self._extract_first_string(
+            payload,
+            paths=("clientReferenceId", "client_reference_id"),
+        )
+        event_type = self._extract_first_string(
+            payload,
+            paths=("event", "event_type", "eventType", "type"),
+        )
+        key_parts: list[str] = [provider.value]
+        if meeting_id:
+            key_parts.append(f"meeting:{meeting_id.strip().lower()}")
+        if transcript_id:
+            key_parts.append(f"transcript:{transcript_id.strip().lower()}")
+        elif client_reference_id:
+            key_parts.append(f"client_reference:{client_reference_id.strip().lower()}")
+        if event_type:
+            key_parts.append(f"event:{event_type.strip().lower()}")
+        if len(key_parts) >= 3:
+            return "|".join(key_parts)
+
         try:
             normalized_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         except TypeError:
@@ -1665,15 +1706,15 @@ class TranscriptionService:
 
     def _is_meeting_action_item(self, item: Mapping[str, Any]) -> bool:
         platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
-        return platform in {"auto", "google_meet", "microsoft_teams"}
+        return platform in {"google_meet", "microsoft_teams"}
 
     def _item_requires_google_meet(self, item: Mapping[str, Any]) -> bool:
         platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
-        return platform in {"auto", "google_meet"}
+        return platform == "google_meet"
 
     def _item_requires_teams(self, item: Mapping[str, Any]) -> bool:
         platform = (self._to_text(item.get("online_meeting_platform")) or "").lower()
-        return platform in {"auto", "microsoft_teams"}
+        return platform == "microsoft_teams"
 
     def _build_action_item_match_key(self, item: Mapping[str, Any], index: int) -> str:
         due_date = (self._to_text(item.get("due_date")) or "").strip().lower()

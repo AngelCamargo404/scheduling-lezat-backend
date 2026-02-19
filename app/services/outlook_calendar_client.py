@@ -336,7 +336,7 @@ class OutlookCalendarClient:
 
     def _should_create_teams_meeting(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform in {"microsoft_teams", "auto"}
+        return platform == "microsoft_teams"
 
     def _normalize_attendee_emails(self, attendee_emails: list[str] | None) -> list[str]:
         if not attendee_emails:

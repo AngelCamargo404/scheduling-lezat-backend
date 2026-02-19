@@ -158,7 +158,7 @@ def test_action_item_infers_monthly_recurrence_due_date_and_teams() -> None:
     assert item.online_meeting_platform == "microsoft_teams"
 
 
-def test_action_item_sets_auto_meeting_platform_when_task_is_meeting() -> None:
+def test_action_item_does_not_force_meeting_platform_without_explicit_provider() -> None:
     item = ActionItem.from_payload(
         {
             "title": "Reunion con cliente potencial",
@@ -169,9 +169,8 @@ def test_action_item_sets_auto_meeting_platform_when_task_is_meeting() -> None:
 
     assert item is not None
     assert item.due_date == "2026-03-20"
-    assert item.online_meeting_platform == "auto"
-    assert item.scheduled_start is not None
-    assert item.scheduled_start.startswith("2026-03-20T09:00:00")
+    assert item.online_meeting_platform is None
+    assert item.scheduled_start is None
 
 
 def test_action_item_infers_event_timezone_from_transcription_context() -> None:

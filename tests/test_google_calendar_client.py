@@ -151,7 +151,7 @@ def test_google_calendar_client_returns_meet_link_in_event_details(
             title="Reunion de seguimiento",
             due_date="2026-03-21",
             scheduled_start="2026-03-21T10:00:00",
-            online_meeting_platform="auto",
+            online_meeting_platform="google_meet",
         ),
         meeting_id="meeting-4",
     )
@@ -180,7 +180,7 @@ def test_google_calendar_client_sends_attendees_and_updates(
             title="Reunion de invitados",
             due_date="2026-03-22",
             scheduled_start="2026-03-22T09:00:00",
-            online_meeting_platform="auto",
+            online_meeting_platform="google_meet",
         ),
         meeting_id="meeting-5",
         attendee_emails=["a@example.com", "b@example.com"],

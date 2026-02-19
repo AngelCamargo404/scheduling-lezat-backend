@@ -142,8 +142,6 @@ class ActionItem:
             online_meeting_platform = "auto"
         if not online_meeting_platform:
             online_meeting_platform = _infer_online_meeting_platform_from_context(payload)
-        if not online_meeting_platform and _looks_like_meeting_context(payload):
-            online_meeting_platform = "auto"
         event_timezone = _resolve_event_timezone(payload)
 
         scheduled_start = _normalize_scheduled_start(
@@ -915,10 +913,7 @@ def _normalize_online_meeting_platform(value: Any) -> str | None:
         return "google_meet"
     if re.search(r"\b(microsoft\s+teams|ms\s+teams|teams)\b", normalized):
         return "microsoft_teams"
-    if re.search(
-        r"\b(auto|virtual|online|en linea|videollamada|video llamada|video call|zoom)\b",
-        normalized,
-    ):
+    if re.search(r"\bauto\b", normalized):
         return "auto"
     return None
 

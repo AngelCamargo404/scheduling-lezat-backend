@@ -78,7 +78,7 @@ class _FakeOutlookCalendarClient:
     ) -> str:
         self.calls += 1
         assert meeting_id == "meeting-4"
-        assert item.online_meeting_platform == "auto"
+        assert item.online_meeting_platform == "microsoft_teams"
         assert item.scheduled_start == "2026-03-20T09:00:00"
         return "outlook-event-1"
 
@@ -186,8 +186,8 @@ def test_sync_uses_scheduled_start_for_calendar_creation() -> None:
     assert fake_google.calls == 1
 
 
-def test_sync_creates_meet_and_teams_when_meeting_platform_is_auto_and_both_calendars_enabled() -> None:
-    class _FakeGeminiAutoMeetingClient:
+def test_sync_creates_events_for_explicit_teams_meeting_when_both_calendars_enabled() -> None:
+    class _FakeGeminiTeamsMeetingClient:
         def extract_action_items(
             self,
             *,
@@ -201,11 +201,11 @@ def test_sync_creates_meet_and_teams_when_meeting_platform_is_auto_and_both_cale
                     title="Reunion para desarrollar proyecto",
                     due_date="2026-03-20",
                     scheduled_start="2026-03-20T09:00:00",
-                    online_meeting_platform="auto",
+                    online_meeting_platform="microsoft_teams",
                 ),
             ]
 
-    class _FakeGoogleCalendarClientAuto:
+    class _FakeGoogleCalendarClientForTeams:
         def __init__(self) -> None:
             self.calls = 0
 
@@ -217,7 +217,7 @@ def test_sync_creates_meet_and_teams_when_meeting_platform_is_auto_and_both_cale
         ) -> str:
             self.calls += 1
             assert meeting_id == "meeting-4"
-            assert item.online_meeting_platform == "auto"
+            assert item.online_meeting_platform == "microsoft_teams"
             return "google-event-2"
 
         def create_due_date_event_with_details(
@@ -229,14 +229,14 @@ def test_sync_creates_meet_and_teams_when_meeting_platform_is_auto_and_both_cale
             event_id = self.create_due_date_event(item=item, meeting_id=meeting_id)
             return {
                 "event_id": event_id,
-                "google_meet_link": "https://meet.google.com/fake-auto-link",
+                "google_meet_link": None,
             }
 
-    fake_google = _FakeGoogleCalendarClientAuto()
+    fake_google = _FakeGoogleCalendarClientForTeams()
     fake_outlook = _FakeOutlookCalendarClient()
     service = ActionItemSyncService(
         settings=Settings(),
-        gemini_client=_FakeGeminiAutoMeetingClient(),
+        gemini_client=_FakeGeminiTeamsMeetingClient(),
         notion_client=None,
         monday_kanban_client=_FakeMondayClient(),
         google_calendar_client=fake_google,
@@ -259,8 +259,8 @@ def test_sync_creates_meet_and_teams_when_meeting_platform_is_auto_and_both_cale
     assert fake_outlook.calls == 1
 
 
-def test_sync_creates_only_google_meet_when_auto_and_only_google_is_configured() -> None:
-    class _FakeGeminiAutoMeetingClient:
+def test_sync_creates_only_google_meet_when_platform_is_google_meet_and_only_google_is_configured() -> None:
+    class _FakeGeminiGoogleMeetClient:
         def extract_action_items(
             self,
             *,
@@ -274,11 +274,11 @@ def test_sync_creates_only_google_meet_when_auto_and_only_google_is_configured()
                     title="Reunion de seguimiento cliente",
                     due_date="2026-03-21",
                     scheduled_start="2026-03-21T10:00:00",
-                    online_meeting_platform="auto",
+                    online_meeting_platform="google_meet",
                 ),
             ]
 
-    class _FakeGoogleCalendarClientAuto:
+    class _FakeGoogleCalendarClientWithMeet:
         def __init__(self) -> None:
             self.calls = 0
 
@@ -290,7 +290,7 @@ def test_sync_creates_only_google_meet_when_auto_and_only_google_is_configured()
         ) -> str:
             self.calls += 1
             assert meeting_id == "meeting-5"
-            assert item.online_meeting_platform == "auto"
+            assert item.online_meeting_platform == "google_meet"
             return "google-event-3"
 
         def create_due_date_event_with_details(
@@ -302,13 +302,13 @@ def test_sync_creates_only_google_meet_when_auto_and_only_google_is_configured()
             event_id = self.create_due_date_event(item=item, meeting_id=meeting_id)
             return {
                 "event_id": event_id,
-                "google_meet_link": "https://meet.google.com/fake-auto-link-2",
+                "google_meet_link": "https://meet.google.com/fake-explicit-link",
             }
 
-    fake_google = _FakeGoogleCalendarClientAuto()
+    fake_google = _FakeGoogleCalendarClientWithMeet()
     service = ActionItemSyncService(
         settings=Settings(),
-        gemini_client=_FakeGeminiAutoMeetingClient(),
+        gemini_client=_FakeGeminiGoogleMeetClient(),
         notion_client=None,
         monday_kanban_client=_FakeMondayClient(),
         google_calendar_client=fake_google,
@@ -330,8 +330,8 @@ def test_sync_creates_only_google_meet_when_auto_and_only_google_is_configured()
     assert fake_google.calls == 1
 
 
-def test_sync_marks_outlook_error_when_teams_link_is_missing_for_auto_meetings() -> None:
-    class _FakeGeminiAutoMeetingClient:
+def test_sync_marks_outlook_error_when_teams_link_is_missing_for_explicit_teams_meeting() -> None:
+    class _FakeGeminiTeamsMeetingClient:
         def extract_action_items(
             self,
             *,
@@ -345,7 +345,7 @@ def test_sync_marks_outlook_error_when_teams_link_is_missing_for_auto_meetings()
                     title="Reunion sin link de Teams",
                     due_date="2026-03-22",
                     scheduled_start="2026-03-22T09:00:00",
-                    online_meeting_platform="auto",
+                    online_meeting_platform="microsoft_teams",
                 ),
             ]
 
@@ -358,7 +358,7 @@ def test_sync_marks_outlook_error_when_teams_link_is_missing_for_auto_meetings()
         ) -> dict[str, str | None]:
             return {
                 "event_id": "google-event-4",
-                "google_meet_link": "https://meet.google.com/fake-auto-link-3",
+                "google_meet_link": None,
             }
 
     class _FakeOutlookCalendarClientWithoutLink:
@@ -376,7 +376,7 @@ def test_sync_marks_outlook_error_when_teams_link_is_missing_for_auto_meetings()
 
     service = ActionItemSyncService(
         settings=Settings(),
-        gemini_client=_FakeGeminiAutoMeetingClient(),
+        gemini_client=_FakeGeminiTeamsMeetingClient(),
         notion_client=None,
         monday_kanban_client=_FakeMondayClient(),
         google_calendar_client=_FakeGoogleCalendarClientWithLink(),
@@ -395,7 +395,7 @@ def test_sync_marks_outlook_error_when_teams_link_is_missing_for_auto_meetings()
     assert result["outlook_calendar_status"] == "failed_sync"
     assert result["google_calendar_created_count"] == 1
     assert result["outlook_calendar_created_count"] == 0
-    assert result["items"][0]["google_meet_link"] == "https://meet.google.com/fake-auto-link-3"
+    assert result["items"][0]["google_meet_link"] is None
     assert result["items"][0]["outlook_calendar_status"] == "failed_missing_teams_link"
     assert result["items"][0]["outlook_teams_link"] is None
 
@@ -415,7 +415,7 @@ def test_sync_skips_meeting_calendar_creation_when_shared_team_event_flags_are_e
                     title="Reunion con cliente",
                     due_date="2026-04-15",
                     scheduled_start="2026-04-15T10:00:00",
-                    online_meeting_platform="auto",
+                    online_meeting_platform="google_meet",
                 ),
             ]
 
@@ -568,3 +568,73 @@ def test_sync_does_not_skip_non_meeting_calendar_items_when_shared_team_flags_ar
     assert result["items"][0]["outlook_calendar_status"] == "created"
     assert fake_google.calls == 1
     assert fake_outlook.calls == 1
+
+
+def test_sync_does_not_send_attendees_for_non_meeting_calendar_items() -> None:
+    class _FakeGeminiNonMeetingClient:
+        def extract_action_items(
+            self,
+            *,
+            meeting_id: str | None,
+            transcript_text: str | None,
+            transcript_sentences: list[dict[str, object]],
+            participant_emails: list[str],
+        ) -> list[ActionItem]:
+            return [
+                ActionItem(
+                    title="Enviar minuta",
+                    due_date="2026-04-20",
+                    scheduled_start="2026-04-20T09:30:00",
+                    online_meeting_platform=None,
+                ),
+            ]
+
+    captured_google_attendees: list[str] = []
+    captured_outlook_attendees: list[str] = []
+
+    class _FakeGoogleClient:
+        def create_due_date_event_with_details(
+            self,
+            *,
+            item: ActionItem,
+            meeting_id: str | None,
+            attendee_emails: list[str] | None = None,
+        ) -> dict[str, str | None]:
+            captured_google_attendees.extend(attendee_emails or [])
+            return {"event_id": "google-event-non-meeting", "google_meet_link": None}
+
+    class _FakeOutlookClient:
+        def create_due_date_event_with_details(
+            self,
+            *,
+            item: ActionItem,
+            meeting_id: str | None,
+            attendee_emails: list[str] | None = None,
+        ) -> dict[str, str | bool | None]:
+            captured_outlook_attendees.extend(attendee_emails or [])
+            return {
+                "event_id": "outlook-event-non-meeting",
+                "teams_join_url": None,
+                "is_online_meeting": False,
+            }
+
+    service = ActionItemSyncService(
+        settings=Settings(),
+        gemini_client=_FakeGeminiNonMeetingClient(),
+        notion_client=None,
+        monday_kanban_client=_FakeMondayClient(),
+        google_calendar_client=_FakeGoogleClient(),
+        outlook_calendar_client=_FakeOutlookClient(),
+    )
+    result = service.sync(
+        meeting_id="meeting-7",
+        transcript_text="Enviar minuta al equipo.",
+        transcript_sentences=[],
+        participant_emails=["a@example.com", "b@example.com"],
+    )
+
+    assert result["status"] == "completed"
+    assert result["google_calendar_status"] == "completed"
+    assert result["outlook_calendar_status"] == "completed"
+    assert captured_google_attendees == []
+    assert captured_outlook_attendees == []

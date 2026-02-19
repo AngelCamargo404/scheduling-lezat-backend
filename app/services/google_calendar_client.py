@@ -183,7 +183,7 @@ class GoogleCalendarClient:
 
     def _should_create_google_meet(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform in {"google_meet", "auto"}
+        return platform == "google_meet"
 
     def _normalize_attendee_emails(self, attendee_emails: list[str] | None) -> list[str]:
         if not attendee_emails:

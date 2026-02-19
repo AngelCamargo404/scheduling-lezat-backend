@@ -245,7 +245,12 @@ class ActionItemSyncService:
             serialized_item["status"] = "created"
 
             if action_item.has_calendar_schedule():
-                if skip_google_meeting_items and self._requires_google_meet_link(action_item):
+                attendee_emails_for_calendar = (
+                    normalized_calendar_attendees
+                    if self._is_explicit_online_meeting(action_item)
+                    else []
+                )
+                if skip_google_meeting_items and self._is_explicit_online_meeting(action_item):
                     serialized_item["google_calendar_status"] = "skipped_shared_team_meeting_event"
                     serialized_item["google_calendar_error"] = None
                 elif not self.google_calendar_client:
@@ -258,7 +263,7 @@ class ActionItemSyncService:
                         event_id, google_meet_link = self._create_google_calendar_event(
                             item=action_item,
                             meeting_id=meeting_id,
-                            attendee_emails=normalized_calendar_attendees,
+                            attendee_emails=attendee_emails_for_calendar,
                         )
                     except GoogleCalendarError as exc:
                         serialized_item["google_calendar_status"] = "failed"
@@ -275,7 +280,7 @@ class ActionItemSyncService:
                             serialized_item["google_calendar_status"] = "created"
                             google_calendar_created_count += 1
 
-                if skip_outlook_meeting_items and self._requires_teams_link(action_item):
+                if skip_outlook_meeting_items and self._is_explicit_online_meeting(action_item):
                     serialized_item["outlook_calendar_status"] = "skipped_shared_team_meeting_event"
                     serialized_item["outlook_calendar_error"] = None
                 elif not self.outlook_calendar_client:
@@ -288,7 +293,7 @@ class ActionItemSyncService:
                         event_id, teams_join_url = self._create_outlook_calendar_event(
                             item=action_item,
                             meeting_id=meeting_id,
-                            attendee_emails=normalized_calendar_attendees,
+                            attendee_emails=attendee_emails_for_calendar,
                         )
                     except OutlookCalendarError as exc:
                         serialized_item["outlook_calendar_status"] = "failed"
@@ -600,11 +605,15 @@ class ActionItemSyncService:
 
     def _requires_google_meet_link(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform in {"google_meet", "auto"}
+        return platform == "google_meet"
 
     def _requires_teams_link(self, item: ActionItem) -> bool:
         platform = (item.online_meeting_platform or "").strip().lower()
-        return platform in {"microsoft_teams", "auto"}
+        return platform == "microsoft_teams"
+
+    def _is_explicit_online_meeting(self, item: ActionItem) -> bool:
+        platform = (item.online_meeting_platform or "").strip().lower()
+        return platform in {"google_meet", "microsoft_teams"}
 
     def _normalize_calendar_link(self, value: Any) -> str | None:
         if not isinstance(value, str):

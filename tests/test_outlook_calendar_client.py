@@ -182,7 +182,7 @@ def test_outlook_calendar_client_returns_teams_link_in_event_details(
             title="Reunion de seguimiento",
             due_date="2026-03-20",
             scheduled_start="2026-03-20T09:00:00",
-            online_meeting_platform="auto",
+            online_meeting_platform="microsoft_teams",
         ),
         meeting_id="meeting-5",
     )
@@ -210,7 +210,7 @@ def test_outlook_calendar_client_sends_attendees(
             title="Reunion de invitados",
             due_date="2026-03-23",
             scheduled_start="2026-03-23T10:00:00",
-            online_meeting_platform="auto",
+            online_meeting_platform="microsoft_teams",
         ),
         meeting_id="meeting-6",
         attendee_emails=["a@example.com", "b@example.com"],

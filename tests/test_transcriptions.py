@@ -81,6 +81,75 @@ def test_fireflies_webhook_accepts_google_meet_transcript(
     assert data["stored_record_id"]
 
 
+def test_fireflies_webhook_is_idempotent_with_same_meeting_and_transcript_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sync_calls = {"count": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+    ) -> dict[str, object]:
+        sync_calls["count"] += 1
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "monday_status": "not_required_no_action_items",
+            "monday_created_count": 0,
+            "monday_error": None,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload_v1 = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-idempotent-1",
+            "platform": "google_meet",
+        },
+        "transcript": {
+            "id": "transcript-idempotent-1",
+            "text": "Primer payload.",
+        },
+        "delivery_id": "delivery-1",
+    }
+    payload_v2 = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-idempotent-1",
+            "platform": "google_meet",
+        },
+        "transcript": {
+            "id": "transcript-idempotent-1",
+            "text": "Segundo payload con metadata distinta.",
+        },
+        "delivery_id": "delivery-2",
+        "received_at": "2026-02-19T10:00:00Z",
+    }
+
+    first_response = client.post("/api/transcriptions/webhooks/fireflies", json=payload_v1)
+    second_response = client.post("/api/transcriptions/webhooks/fireflies", json=payload_v2)
+
+    assert first_response.status_code == 202
+    assert second_response.status_code == 202
+    assert sync_calls["count"] == 1
+    assert first_response.json()["stored_record_id"] == second_response.json()["stored_record_id"]
+    assert second_response.json()["enrichment_status"] == "skipped_duplicate"
+
+
 def test_fireflies_webhook_accepts_valid_hmac_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1048,7 +1117,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
         item = {
             "title": "Reunion semanal del equipo",
             "status": "created",
-            "online_meeting_platform": "auto",
+            "online_meeting_platform": "google_meet",
             "due_date": "2026-04-02",
             "scheduled_start": "2026-04-02T10:00:00",
             "google_calendar_status": "skipped_missing_configuration",
@@ -1148,7 +1217,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
     assert lead_item["outlook_teams_link"] == "https://teams.live.com/meet/shared-team-link"
     assert member_item["outlook_teams_link"] == "https://teams.live.com/meet/shared-team-link"
     assert member_item["google_calendar_status"] == "shared_from_team_event"
-    assert member_item["outlook_calendar_status"] == "shared_from_team_event"
+    assert member_item["outlook_calendar_status"] == "created"
 
 
 def test_user_scoped_webhook_skips_when_lead_disabled_team_activation(
