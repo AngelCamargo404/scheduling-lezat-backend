@@ -992,6 +992,7 @@ class TranscriptionService:
         force_disable_outlook_calendar: bool = False,
         skip_google_meeting_items: bool = False,
         skip_outlook_meeting_items: bool = False,
+        pre_extracted_action_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.action_item_sync_service:
             return {
@@ -1087,6 +1088,8 @@ class TranscriptionService:
                 sync_kwargs["skip_google_meeting_items"] = True
             if skip_outlook_meeting_items:
                 sync_kwargs["skip_outlook_meeting_items"] = True
+            if pre_extracted_action_items is not None:
+                sync_kwargs["pre_extracted_action_items"] = pre_extracted_action_items
             return sync_service.sync(**sync_kwargs)
         except TypeError as exc:
             error_message = str(exc)
@@ -1096,6 +1099,9 @@ class TranscriptionService:
                 removed_any_kwarg = True
             if "skip_outlook_meeting_items" in error_message:
                 sync_kwargs.pop("skip_outlook_meeting_items", None)
+                removed_any_kwarg = True
+            if "pre_extracted_action_items" in error_message:
+                sync_kwargs.pop("pre_extracted_action_items", None)
                 removed_any_kwarg = True
             if removed_any_kwarg:
                 try:
@@ -1222,6 +1228,7 @@ class TranscriptionService:
         raw_user_runs: list[dict[str, Any]] = []
         shared_google_payloads: dict[str, dict[str, Any]] = {}
         shared_outlook_payloads: dict[str, dict[str, Any]] = {}
+        shared_pre_extracted_action_items: list[dict[str, Any]] | None = None
 
         for target_user_id in ordered_target_user_ids:
             target_user_email: str | None = None
@@ -1245,6 +1252,7 @@ class TranscriptionService:
                 calendar_attendee_emails=calendar_attendee_emails,
                 skip_google_meeting_items=skip_google_meeting_items,
                 skip_outlook_meeting_items=skip_outlook_meeting_items,
+                pre_extracted_action_items=shared_pre_extracted_action_items,
             )
             raw_user_runs.append(
                 {
@@ -1258,6 +1266,14 @@ class TranscriptionService:
             monday_created_count += self._to_int(result.get("monday_created_count")) or 0
 
             raw_items = result.get("items")
+            if (
+                shared_pre_extracted_action_items is None
+                and (self._to_int(result.get("extracted_count")) or 0) > 0
+                and isinstance(raw_items, list)
+            ):
+                shared_pre_extracted_action_items = self._extract_pre_extracted_action_items(
+                    raw_items,
+                )
             if not isinstance(raw_items, list):
                 continue
             result_google_count = self._to_int(result.get("google_calendar_created_count")) or 0
@@ -1544,6 +1560,40 @@ class TranscriptionService:
             seen.add(user_id)
             prioritized.append(user_id)
         return prioritized
+
+    def _extract_pre_extracted_action_items(
+        self,
+        items: list[Any],
+    ) -> list[dict[str, Any]]:
+        def _optional_text(value: Any) -> str | None:
+            normalized_value = self._to_text(value)
+            return normalized_value if normalized_value else None
+
+        normalized_items: list[dict[str, Any]] = []
+        for raw_item in items:
+            if not isinstance(raw_item, Mapping):
+                continue
+            title = self._to_text(raw_item.get("title"))
+            if not title:
+                continue
+            normalized_items.append(
+                {
+                    "title": title,
+                    "assignee_email": _optional_text(raw_item.get("assignee_email")),
+                    "assignee_name": _optional_text(raw_item.get("assignee_name")),
+                    "due_date": _optional_text(raw_item.get("due_date")),
+                    "details": _optional_text(raw_item.get("details")),
+                    "source_sentence": _optional_text(raw_item.get("source_sentence")),
+                    "scheduled_start": _optional_text(raw_item.get("scheduled_start")),
+                    "scheduled_end": _optional_text(raw_item.get("scheduled_end")),
+                    "event_timezone": _optional_text(raw_item.get("event_timezone")),
+                    "recurrence_rule": _optional_text(raw_item.get("recurrence_rule")),
+                    "online_meeting_platform": _optional_text(
+                        raw_item.get("online_meeting_platform"),
+                    ),
+                },
+            )
+        return normalized_items
 
     def _build_team_calendar_attendee_emails(
         self,

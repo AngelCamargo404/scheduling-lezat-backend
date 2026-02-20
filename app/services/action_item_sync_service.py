@@ -44,10 +44,14 @@ class ActionItemSyncService:
         calendar_attendee_emails: list[str] | None = None,
         skip_google_meeting_items: bool = False,
         skip_outlook_meeting_items: bool = False,
+        pre_extracted_action_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         notes_outputs_description = self._describe_enabled_notes_outputs()
         normalized_calendar_attendees = sanitize_action_item_participants(
             calendar_attendee_emails or participant_emails,
+        )
+        normalized_pre_extracted = self._normalize_pre_extracted_action_items(
+            pre_extracted_action_items,
         )
         if not transcript_text:
             return self._build_result(
@@ -66,7 +70,9 @@ class ActionItemSyncService:
                 items=[],
                 error=None,
             )
-        if self.settings.action_items_test_mode_enabled:
+        if normalized_pre_extracted is not None:
+            action_items = normalized_pre_extracted
+        elif self.settings.action_items_test_mode_enabled:
             if not self.notion_client and not self.monday_kanban_client:
                 return self._build_result(
                     status="skipped_missing_configuration",
@@ -119,7 +125,7 @@ class ActionItemSyncService:
                 ),
             )
 
-        if not self.settings.action_items_test_mode_enabled:
+        if normalized_pre_extracted is None and not self.settings.action_items_test_mode_enabled:
             try:
                 action_items = self.gemini_client.extract_action_items(
                     meeting_id=meeting_id,
@@ -366,6 +372,25 @@ class ActionItemSyncService:
             items=serialized_items,
             error=error,
         )
+
+    def _normalize_pre_extracted_action_items(
+        self,
+        raw_items: list[dict[str, Any]] | None,
+    ) -> list[ActionItem] | None:
+        if raw_items is None:
+            return None
+        normalized: list[ActionItem] = []
+        reference_date = datetime.now(UTC).date()
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                continue
+            parsed_item = ActionItem.from_payload(
+                dict(raw_item),
+                reference_date=reference_date,
+            )
+            if parsed_item:
+                normalized.append(parsed_item)
+        return normalized
 
     def _build_test_action_items(
         self,

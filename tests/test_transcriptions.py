@@ -844,6 +844,298 @@ def test_webhook_routes_action_items_to_configured_team_recipients(
     assert stored_record["action_items_sync"]["created_count"] == 2
 
 
+def test_webhook_routes_action_items_to_all_active_team_members_when_participant_matches_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.all-members@example.com",
+        full_name="Lead All Members",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.all-members@example.com",
+        full_name="Member All Members",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-all-members-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-all-members-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo All Members",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+
+    captured_notion_tokens: list[str] = []
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        captured_notion_tokens.append(self.settings.notion_api_token)
+        assert meeting_id == "meeting-team-all-members-1"
+        assert participant_emails == ["member.all-members@example.com"]
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [{"title": "Tarea", "status": "created"}],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-team-all-members-1",
+            "platform": "google_meet",
+        },
+        "participants": ["member.all-members@example.com"],
+        "transcript": {
+            "id": "transcript-team-all-members-1",
+            "text": "Registrar acuerdo para todos.",
+        },
+    }
+    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 2
+    assert sorted(captured_notion_tokens) == [
+        "lead-all-members-notion-token",
+        "member-all-members-notion-token",
+    ]
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-team-all-members-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    assert stored_record["action_items_sync"]["routed_via_team_memberships"] is True
+    assert stored_record["action_items_sync"]["matched_team_ids"] == [team_id]
+    assert len(stored_record["action_items_sync"]["target_users"]) == 2
+    assert stored_record["action_items_sync"]["created_count"] == 2
+
+
+def test_webhook_reuses_extracted_action_items_for_team_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.cached@example.com",
+        full_name="Lead Cached",
+        password_hash="hashed",
+        role="user",
+    )
+    member = user_store.create_user(
+        email="member.cached@example.com",
+        full_name="Member Cached",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    member_user_id = str(member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-cached-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+    user_store.upsert_user_settings_values(
+        member_user_id,
+        {
+            "NOTION_API_TOKEN": "member-cached-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team = team_store.create_team(
+        name="Equipo Cached Extraction",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id, member_user_id],
+    )
+    team_id = str(team["_id"])
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=team_id,
+        user_id=member_user_id,
+        role="member",
+        status="accepted",
+    )
+
+    captured_pre_extracted: dict[str, list[dict[str, object]] | None] = {}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+        pre_extracted_action_items: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        token = self.settings.notion_api_token
+        captured_pre_extracted[token] = pre_extracted_action_items
+
+        if token == "lead-cached-notion-token":
+            assert pre_extracted_action_items is None
+            return {
+                "status": "completed",
+                "extracted_count": 1,
+                "created_count": 1,
+                "google_calendar_status": "not_required_no_due_dates",
+                "google_calendar_created_count": 0,
+                "google_calendar_error": None,
+                "outlook_calendar_status": "not_required_no_due_dates",
+                "outlook_calendar_created_count": 0,
+                "outlook_calendar_error": None,
+                "items": [
+                    {
+                        "title": "Entrega de credenciales",
+                        "assignee_email": None,
+                        "assignee_name": None,
+                        "due_date": "2026-04-14",
+                        "details": "Se debe realizar la entrega.",
+                        "source_sentence": "Se realizará la entrega de credenciales.",
+                        "scheduled_start": None,
+                        "scheduled_end": None,
+                        "event_timezone": None,
+                        "recurrence_rule": None,
+                        "online_meeting_platform": None,
+                        "status": "created",
+                    },
+                ],
+                "error": None,
+            }
+
+        if token == "member-cached-notion-token":
+            assert pre_extracted_action_items is not None
+            assert len(pre_extracted_action_items) == 1
+            assert pre_extracted_action_items[0]["title"] == "Entrega de credenciales"
+            return {
+                "status": "completed",
+                "extracted_count": 1,
+                "created_count": 1,
+                "google_calendar_status": "not_required_no_due_dates",
+                "google_calendar_created_count": 0,
+                "google_calendar_error": None,
+                "outlook_calendar_status": "not_required_no_due_dates",
+                "outlook_calendar_created_count": 0,
+                "outlook_calendar_error": None,
+                "items": [
+                    {
+                        **pre_extracted_action_items[0],
+                        "status": "created",
+                    },
+                ],
+                "error": None,
+            }
+
+        raise AssertionError(f"Notion token inesperado: {token}")
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-team-cached-extraction-1",
+            "platform": "google_meet",
+        },
+        "participants": ["member.cached@example.com"],
+        "transcript": {
+            "id": "transcript-team-cached-extraction-1",
+            "text": "Crear entrega de credenciales para el equipo.",
+        },
+    }
+    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 2
+    assert captured_pre_extracted["lead-cached-notion-token"] is None
+    assert captured_pre_extracted["member-cached-notion-token"] is not None
+
+    lookup_response = client.get(
+        "/api/transcriptions/received/by-meeting/meeting-team-cached-extraction-1",
+    )
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["routed_via_team_memberships"] is True
+    assert action_items_sync["matched_team_ids"] == [team_id]
+    target_users = {
+        target["user_id"]: target
+        for target in action_items_sync["target_users"]
+    }
+    assert sorted(target_users.keys()) == sorted([lead_user_id, member_user_id])
+    assert target_users[lead_user_id]["status"] == "completed"
+    assert target_users[member_user_id]["status"] == "completed"
+    assert target_users[member_user_id]["created_count"] == 1
+
+
 def test_user_scoped_webhook_routes_to_lead_and_members_with_user_specific_outputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
