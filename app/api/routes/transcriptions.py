@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any, NoReturn
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 
 @router.post(
     "/webhooks/fireflies",
+    response_model=None,
     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
 )
 async def receive_fireflies_webhook(
     request: Request,
-) -> NoReturn:
+) -> None:
     _reject_unscoped_webhook(
         provider=TranscriptionProvider.fireflies,
         request=request,
@@ -63,11 +64,12 @@ async def receive_fireflies_webhook_for_user(
 
 @router.post(
     "/webhooks/read-ai",
+    response_model=None,
     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
 )
 def receive_read_ai_webhook(
     request: Request,
-) -> NoReturn:
+) -> None:
     _reject_unscoped_webhook(
         provider=TranscriptionProvider.read_ai,
         request=request,
@@ -291,7 +293,7 @@ def _reject_unscoped_webhook(
     *,
     provider: TranscriptionProvider,
     request: Request,
-) -> NoReturn:
+) -> None:
     provider_path_segment = (
         "fireflies" if provider == TranscriptionProvider.fireflies else "read-ai"
     )
