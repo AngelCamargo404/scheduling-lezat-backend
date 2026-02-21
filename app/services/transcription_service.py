@@ -3,6 +3,7 @@ import json
 import hmac
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from threading import Lock
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -36,6 +37,14 @@ from app.services.transcription_store import (
     create_transcription_store,
 )
 from app.services.user_store import UserStore, create_user_store
+
+_IN_FLIGHT_INGESTION_KEYS: set[str] = set()
+_IN_FLIGHT_INGESTION_KEYS_LOCK = Lock()
+
+
+def clear_transcription_processing_locks() -> None:
+    with _IN_FLIGHT_INGESTION_KEYS_LOCK:
+        _IN_FLIGHT_INGESTION_KEYS.clear()
 
 
 class TranscriptionService:
@@ -147,193 +156,209 @@ class TranscriptionService:
             payload=payload,
         )
 
+        processing_slot_acquired = False
         if ingestion_key:
             existing_record = self._get_record_by_ingestion_key(ingestion_key)
             if existing_record:
-                existing_action_items_sync = self._to_mapping(existing_record.get("action_items_sync"))
-                existing_status = (
-                    self._to_text(existing_action_items_sync.get("status"))
-                    if existing_action_items_sync
-                    else None
+                return self._build_webhook_response_from_existing_record(
+                    provider=provider,
+                    existing_record=existing_record,
+                    event_type=event_type,
+                    meeting_id=meeting_id,
+                    client_reference_id=client_reference_id,
+                    transcript_id=transcript_id,
+                    meeting_platform=meeting_platform,
+                )
+            processing_slot_acquired = self._try_acquire_ingestion_processing_slot(ingestion_key)
+            if not processing_slot_acquired:
+                existing_record = self._get_record_by_ingestion_key(ingestion_key)
+                if existing_record:
+                    return self._build_webhook_response_from_existing_record(
+                        provider=provider,
+                        existing_record=existing_record,
+                        event_type=event_type,
+                        meeting_id=meeting_id,
+                        client_reference_id=client_reference_id,
+                        transcript_id=transcript_id,
+                        meeting_platform=meeting_platform,
+                    )
+                fallback_meeting_platform = (
+                    meeting_platform
+                    or self._infer_meeting_platform_from_url(meeting_url)
                 )
                 return TranscriptionWebhookResponse(
                     provider=provider,
-                    event_type=self._to_text(existing_record.get("event_type")) or event_type,
-                    meeting_id=self._to_text(existing_record.get("meeting_id")) or meeting_id,
-                    client_reference_id=self._to_text(existing_record.get("client_reference_id"))
-                    or client_reference_id,
-                    transcript_id=self._to_text(existing_record.get("transcript_id")) or transcript_id,
-                    meeting_platform=self._to_text(existing_record.get("meeting_platform"))
-                    or meeting_platform,
-                    is_google_meet=bool(existing_record.get("is_google_meet", False)),
-                    transcript_text_available=bool(
-                        existing_record.get("transcript_text_available", False)
-                    ),
-                    enrichment_status=self._to_text(existing_record.get("enrichment_status"))
-                    or "skipped_duplicate",
-                    enrichment_error=self._to_text(existing_record.get("enrichment_error")),
-                    action_items_sync_status=existing_status,
-                    action_items_created_count=self._to_int(
-                        existing_action_items_sync.get("created_count"),
-                    )
-                    if existing_action_items_sync
-                    else None,
-                    stored_record_id=self._to_text(existing_record.get("_id")),
-                    received_at=self._to_datetime(existing_record.get("received_at")),
+                    event_type=event_type,
+                    meeting_id=meeting_id,
+                    client_reference_id=client_reference_id,
+                    transcript_id=transcript_id,
+                    meeting_platform=fallback_meeting_platform,
+                    is_google_meet=self._is_google_meet(fallback_meeting_platform, meeting_url),
+                    transcript_text_available=self._extract_transcript_text(payload) is not None,
+                    enrichment_status="skipped_duplicate_in_progress",
+                    enrichment_error=None,
+                    action_items_sync_status="skipped_duplicate_in_progress",
+                    action_items_created_count=0,
+                    stored_record_id=None,
+                    received_at=datetime.now(UTC),
                 )
 
-        transcript_text = self._extract_transcript_text(payload)
-        enrichment_status = "not_required"
-        enrichment_error: str | None = None
-        fireflies_transcript: dict[str, Any] | None = None
-        read_ai_transcript: dict[str, Any] | None = None
-        enrichment_fireflies_client = self._resolve_fireflies_client_for_payload(
-            payload,
-            user_settings_user_id=user_settings_user_id,
-        )
-        enrichment_read_ai_client = self._resolve_read_ai_client_for_payload(
-            payload,
-            user_settings_user_id=user_settings_user_id,
-        )
-
-        if provider == TranscriptionProvider.fireflies:
-            (
-                transcript_text,
-                transcript_id,
-                meeting_url,
-                fireflies_transcript,
-                enrichment_status,
-                enrichment_error,
-            ) = self._enrich_fireflies_transcript(
-                meeting_id=meeting_id,
-                transcript_id=transcript_id,
-                transcript_text=transcript_text,
-                meeting_url=meeting_url,
-                fireflies_client=enrichment_fireflies_client,
+        try:
+            transcript_text = self._extract_transcript_text(payload)
+            enrichment_status = "not_required"
+            enrichment_error: str | None = None
+            fireflies_transcript: dict[str, Any] | None = None
+            read_ai_transcript: dict[str, Any] | None = None
+            enrichment_fireflies_client = self._resolve_fireflies_client_for_payload(
+                payload,
+                user_settings_user_id=user_settings_user_id,
             )
-        elif provider == TranscriptionProvider.read_ai:
-             (
-                transcript_text,
-                transcript_id,
-                meeting_url,
-                read_ai_transcript,
-                enrichment_status,
-                enrichment_error,
-            ) = self._enrich_read_ai_transcript(
-                meeting_id=meeting_id,
-                transcript_id=transcript_id,
-                transcript_text=transcript_text,
-                meeting_url=meeting_url,
-                read_ai_client=enrichment_read_ai_client,
+            enrichment_read_ai_client = self._resolve_read_ai_client_for_payload(
+                payload,
+                user_settings_user_id=user_settings_user_id,
             )
 
-        transcript_sentences: list[dict[str, Any]] = []
-        participants: list[dict[str, Any]] = []
-        participant_emails: list[str] = []
+            if provider == TranscriptionProvider.fireflies:
+                (
+                    transcript_text,
+                    transcript_id,
+                    meeting_url,
+                    fireflies_transcript,
+                    enrichment_status,
+                    enrichment_error,
+                ) = self._enrich_fireflies_transcript(
+                    meeting_id=meeting_id,
+                    transcript_id=transcript_id,
+                    transcript_text=transcript_text,
+                    meeting_url=meeting_url,
+                    fireflies_client=enrichment_fireflies_client,
+                )
+            elif provider == TranscriptionProvider.read_ai:
+                (
+                    transcript_text,
+                    transcript_id,
+                    meeting_url,
+                    read_ai_transcript,
+                    enrichment_status,
+                    enrichment_error,
+                ) = self._enrich_read_ai_transcript(
+                    meeting_id=meeting_id,
+                    transcript_id=transcript_id,
+                    transcript_text=transcript_text,
+                    meeting_url=meeting_url,
+                    read_ai_client=enrichment_read_ai_client,
+                )
 
-        if fireflies_transcript:
-            transcript_sentences = extract_sentences_for_action_items(fireflies_transcript)
-            participants = self._extract_fireflies_participants(fireflies_transcript)
-        elif read_ai_transcript:
-            read_ai_sentences_objs = self._extract_read_ai_sentences(read_ai_transcript)
-            transcript_sentences = [
-                {
-                    "text": s.text,
-                    "speaker_name": s.speaker_name,
-                    "start_time": s.start_time,
-                }
-                for s in read_ai_sentences_objs
-            ]
-            participants = self._extract_read_ai_participants(read_ai_transcript)
-        elif provider == TranscriptionProvider.read_ai:
-            read_ai_sentences_objs = self._extract_read_ai_sentences(payload)
-            transcript_sentences = [
-                {
-                    "text": s.text,
-                    "speaker_name": s.speaker_name,
-                    "start_time": s.start_time,
-                }
-                for s in read_ai_sentences_objs
-            ]
-            participants = self._extract_read_ai_participants(payload)
+            transcript_sentences: list[dict[str, Any]] = []
+            participants: list[dict[str, Any]] = []
+            participant_emails: list[str] = []
 
-        if not participants:
-            participants = self._extract_participants_from_payload(payload)
-        if not participants:
-            participants = self._extract_participants_from_sentences(transcript_sentences)
+            if fireflies_transcript:
+                transcript_sentences = extract_sentences_for_action_items(fireflies_transcript)
+                participants = self._extract_fireflies_participants(fireflies_transcript)
+            elif read_ai_transcript:
+                read_ai_sentences_objs = self._extract_read_ai_sentences(read_ai_transcript)
+                transcript_sentences = [
+                    {
+                        "text": s.text,
+                        "speaker_name": s.speaker_name,
+                        "start_time": s.start_time,
+                    }
+                    for s in read_ai_sentences_objs
+                ]
+                participants = self._extract_read_ai_participants(read_ai_transcript)
+            elif provider == TranscriptionProvider.read_ai:
+                read_ai_sentences_objs = self._extract_read_ai_sentences(payload)
+                transcript_sentences = [
+                    {
+                        "text": s.text,
+                        "speaker_name": s.speaker_name,
+                        "start_time": s.start_time,
+                    }
+                    for s in read_ai_sentences_objs
+                ]
+                participants = self._extract_read_ai_participants(payload)
 
-        participant_emails = self._extract_participant_emails_from_participants(participants)
-        if not participant_emails:
-            participant_emails = self._extract_participant_emails_from_payload(payload)
-        if participant_emails and not participants:
-            participants = self._build_participants_from_emails(participant_emails)
-        participant_emails = sanitize_action_item_participants(participant_emails)
+            if not participants:
+                participants = self._extract_participants_from_payload(payload)
+            if not participants:
+                participants = self._extract_participants_from_sentences(transcript_sentences)
 
-        action_items_sync = self._sync_action_items_with_team_routing(
-            meeting_id=meeting_id,
-            transcript_text=transcript_text,
-            transcript_sentences=transcript_sentences,
-            participant_emails=participant_emails,
-            user_settings_user_id=user_settings_user_id,
-        )
+            participant_emails = self._extract_participant_emails_from_participants(participants)
+            if not participant_emails:
+                participant_emails = self._extract_participant_emails_from_payload(payload)
+            if participant_emails and not participants:
+                participants = self._build_participants_from_emails(participant_emails)
+            participant_emails = sanitize_action_item_participants(participant_emails)
 
-        if not meeting_platform:
-            meeting_platform = self._infer_meeting_platform_from_url(meeting_url)
-        is_google_meet = self._is_google_meet(meeting_platform, meeting_url)
-        received_at = datetime.now(UTC)
+            action_items_sync = self._sync_action_items_with_team_routing(
+                meeting_id=meeting_id,
+                transcript_text=transcript_text,
+                transcript_sentences=transcript_sentences,
+                participant_emails=participant_emails,
+                user_settings_user_id=user_settings_user_id,
+            )
 
-        normalized_document = build_transcription_document(
-            provider=provider.value,
-            event_type=event_type,
-            meeting_id=meeting_id,
-            client_reference_id=client_reference_id,
-            transcript_id=transcript_id,
-            meeting_platform=meeting_platform,
-            is_google_meet=is_google_meet,
-            transcript_text_available=transcript_text is not None,
-            transcript_text=transcript_text,
-            ingestion_key=ingestion_key,
-            enrichment_status=enrichment_status,
-            enrichment_error=enrichment_error,
-            participants=participants,
-            participant_emails=participant_emails,
-            action_items_sync=action_items_sync,
-            fireflies_transcript=fireflies_transcript,
-            read_ai_transcript=read_ai_transcript,
-            raw_payload=payload,
-        )
+            if not meeting_platform:
+                meeting_platform = self._infer_meeting_platform_from_url(meeting_url)
+            is_google_meet = self._is_google_meet(meeting_platform, meeting_url)
+            received_at = datetime.now(UTC)
 
-        stored_record_id = self._save_document(normalized_document)
-        self._save_action_item_creation_records(
-            source="webhook",
-            provider=provider.value,
-            meeting_id=meeting_id,
-            transcript_id=transcript_id,
-            client_reference_id=client_reference_id,
-            transcription_record_id=stored_record_id,
-            participant_emails=participant_emails,
-            action_items_sync=action_items_sync,
-        )
-        return TranscriptionWebhookResponse(
-            provider=provider,
-            event_type=event_type,
-            meeting_id=meeting_id,
-            client_reference_id=client_reference_id,
-            transcript_id=transcript_id,
-            meeting_platform=meeting_platform,
-            is_google_meet=is_google_meet,
-            transcript_text_available=transcript_text is not None,
-            enrichment_status=enrichment_status,
-            enrichment_error=enrichment_error,
-            action_items_sync_status=self._to_text(action_items_sync.get("status"))
-            if action_items_sync
-            else None,
-            action_items_created_count=self._to_int(action_items_sync.get("created_count"))
-            if action_items_sync
-            else None,
-            stored_record_id=stored_record_id,
-            received_at=received_at,
-        )
+            normalized_document = build_transcription_document(
+                provider=provider.value,
+                event_type=event_type,
+                meeting_id=meeting_id,
+                client_reference_id=client_reference_id,
+                transcript_id=transcript_id,
+                meeting_platform=meeting_platform,
+                is_google_meet=is_google_meet,
+                transcript_text_available=transcript_text is not None,
+                transcript_text=transcript_text,
+                ingestion_key=ingestion_key,
+                enrichment_status=enrichment_status,
+                enrichment_error=enrichment_error,
+                participants=participants,
+                participant_emails=participant_emails,
+                action_items_sync=action_items_sync,
+                fireflies_transcript=fireflies_transcript,
+                read_ai_transcript=read_ai_transcript,
+                raw_payload=payload,
+            )
+
+            stored_record_id = self._save_document(normalized_document)
+            self._save_action_item_creation_records(
+                source="webhook",
+                provider=provider.value,
+                meeting_id=meeting_id,
+                transcript_id=transcript_id,
+                client_reference_id=client_reference_id,
+                transcription_record_id=stored_record_id,
+                participant_emails=participant_emails,
+                action_items_sync=action_items_sync,
+            )
+            return TranscriptionWebhookResponse(
+                provider=provider,
+                event_type=event_type,
+                meeting_id=meeting_id,
+                client_reference_id=client_reference_id,
+                transcript_id=transcript_id,
+                meeting_platform=meeting_platform,
+                is_google_meet=is_google_meet,
+                transcript_text_available=transcript_text is not None,
+                enrichment_status=enrichment_status,
+                enrichment_error=enrichment_error,
+                action_items_sync_status=self._to_text(action_items_sync.get("status"))
+                if action_items_sync
+                else None,
+                action_items_created_count=self._to_int(action_items_sync.get("created_count"))
+                if action_items_sync
+                else None,
+                stored_record_id=stored_record_id,
+                received_at=received_at,
+            )
+        finally:
+            if ingestion_key and processing_slot_acquired:
+                self._release_ingestion_processing_slot(ingestion_key)
 
     def list_received(self, limit: int = 50) -> TranscriptionRecordsResponse:
         normalized_limit = min(max(limit, 1), 200)
@@ -542,6 +567,66 @@ class TranscriptionService:
         except Exception:
             return None
 
+    def _build_webhook_response_from_existing_record(
+        self,
+        *,
+        provider: TranscriptionProvider,
+        existing_record: Mapping[str, Any],
+        event_type: str | None,
+        meeting_id: str | None,
+        client_reference_id: str | None,
+        transcript_id: str | None,
+        meeting_platform: str | None,
+    ) -> TranscriptionWebhookResponse:
+        existing_action_items_sync = self._to_mapping(existing_record.get("action_items_sync"))
+        existing_status = (
+            self._to_text(existing_action_items_sync.get("status"))
+            if existing_action_items_sync
+            else None
+        )
+        return TranscriptionWebhookResponse(
+            provider=provider,
+            event_type=self._to_text(existing_record.get("event_type")) or event_type,
+            meeting_id=self._to_text(existing_record.get("meeting_id")) or meeting_id,
+            client_reference_id=self._to_text(existing_record.get("client_reference_id"))
+            or client_reference_id,
+            transcript_id=self._to_text(existing_record.get("transcript_id")) or transcript_id,
+            meeting_platform=(
+                self._to_text(existing_record.get("meeting_platform")) or meeting_platform
+            ),
+            is_google_meet=bool(existing_record.get("is_google_meet", False)),
+            transcript_text_available=bool(
+                existing_record.get("transcript_text_available", False),
+            ),
+            enrichment_status="skipped_duplicate",
+            enrichment_error=self._to_text(existing_record.get("enrichment_error")),
+            action_items_sync_status=existing_status,
+            action_items_created_count=(
+                self._to_int(existing_action_items_sync.get("created_count"))
+                if existing_action_items_sync
+                else None
+            ),
+            stored_record_id=self._to_text(existing_record.get("_id")),
+            received_at=self._to_datetime(existing_record.get("received_at")),
+        )
+
+    def _try_acquire_ingestion_processing_slot(self, ingestion_key: str) -> bool:
+        normalized_ingestion_key = ingestion_key.strip()
+        if not normalized_ingestion_key:
+            return False
+        with _IN_FLIGHT_INGESTION_KEYS_LOCK:
+            if normalized_ingestion_key in _IN_FLIGHT_INGESTION_KEYS:
+                return False
+            _IN_FLIGHT_INGESTION_KEYS.add(normalized_ingestion_key)
+            return True
+
+    def _release_ingestion_processing_slot(self, ingestion_key: str) -> None:
+        normalized_ingestion_key = ingestion_key.strip()
+        if not normalized_ingestion_key:
+            return
+        with _IN_FLIGHT_INGESTION_KEYS_LOCK:
+            _IN_FLIGHT_INGESTION_KEYS.discard(normalized_ingestion_key)
+
     def _build_ingestion_key(
         self,
         *,
@@ -629,6 +714,16 @@ class TranscriptionService:
                 None,
                 "failed_missing_meeting_id",
                 "Webhook payload missing meetingId.",
+            )
+
+        if transcript_text:
+            return (
+                transcript_text,
+                transcript_id,
+                meeting_url,
+                None,
+                "completed_payload",
+                None,
             )
 
         active_client = fireflies_client or self.fireflies_client
@@ -771,6 +866,16 @@ class TranscriptionService:
                 None,
                 "skipped_no_meeting_id",
                 "No meeting_id provided in webhook.",
+            )
+
+        if transcript_text:
+            return (
+                transcript_text,
+                transcript_id,
+                meeting_url,
+                None,
+                "completed_payload",
+                None,
             )
 
         active_client = read_ai_client or self.read_ai_client
@@ -1171,7 +1276,13 @@ class TranscriptionService:
             user_settings_user_id=user_settings_user_id,
         )
         if not target_user_ids:
-            if matched_team_ids:
+            should_fallback_to_independent_user = (
+                self._should_fallback_to_independent_user_sync(
+                    matched_team_ids=matched_team_ids,
+                    user_settings_user_id=user_settings_user_id,
+                )
+            )
+            if matched_team_ids and not should_fallback_to_independent_user:
                 return {
                     "status": "skipped_no_active_team_recipients",
                     "extracted_count": 0,
@@ -1683,23 +1794,42 @@ class TranscriptionService:
                 user_email = self._to_text(user_record.get("email"))
                 if user_email and "@" in user_email:
                     attendee_emails.add(user_email.strip().lower())
+        return sorted(attendee_emails)
+
+    def _should_fallback_to_independent_user_sync(
+        self,
+        *,
+        matched_team_ids: list[str],
+        user_settings_user_id: str | None,
+    ) -> bool:
+        normalized_user_id = (user_settings_user_id or "").strip()
+        normalized_team_ids = {
+            team_id.strip()
+            for team_id in matched_team_ids
+            if team_id and team_id.strip()
+        }
+        if not normalized_user_id or not normalized_team_ids:
+            return False
+
         team_membership_service = self._get_team_membership_service()
         team_store = (
             team_membership_service.team_store
             if team_membership_service and hasattr(team_membership_service, "team_store")
             else None
         )
-        if team_store:
-            for team_id in matched_team_ids:
-                pending_invitations = team_store.list_pending_invitations_for_team(team_id)
-                for invitation in pending_invitations:
-                    invitation_status = self._to_text(invitation.get("status")) or "pending"
-                    if invitation_status != "pending":
-                        continue
-                    invited_email = self._to_text(invitation.get("invited_email"))
-                    if invited_email and "@" in invited_email:
-                        attendee_emails.add(invited_email.strip().lower())
-        return sorted(attendee_emails)
+        if not team_store:
+            return False
+
+        memberships = team_store.list_memberships_for_user(normalized_user_id, status="accepted")
+        has_membership_in_matched_team = False
+        for membership in memberships:
+            team_id = self._to_text(membership.get("team_id"))
+            if not team_id or team_id not in normalized_team_ids:
+                continue
+            has_membership_in_matched_team = True
+            if bool(membership.get("is_active", True)):
+                return False
+        return has_membership_in_matched_team
 
     def _build_shared_channel_payloads(
         self,

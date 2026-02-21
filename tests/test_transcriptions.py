@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.main import app
+from app.schemas.transcription import TranscriptionProvider
 from app.services.action_item_creation_store import (
     clear_action_item_creation_store_cache,
     create_action_item_creation_store,
@@ -16,7 +17,10 @@ from app.services.team_membership_store import (
     clear_team_membership_store_cache,
     create_team_membership_store,
 )
-from app.services.transcription_service import TranscriptionService
+from app.services.transcription_service import (
+    TranscriptionService,
+    clear_transcription_processing_locks,
+)
 from app.services.transcription_store import clear_transcription_store_cache
 from app.services.user_store import clear_user_store_cache, create_user_store
 
@@ -34,6 +38,7 @@ def clear_settings_cache() -> None:
     clear_action_item_creation_store_cache()
     clear_user_store_cache()
     clear_team_membership_store_cache()
+    clear_transcription_processing_locks()
     yield
     monkeypatch.undo()
     get_settings.cache_clear()
@@ -41,6 +46,7 @@ def clear_settings_cache() -> None:
     clear_action_item_creation_store_cache()
     clear_user_store_cache()
     clear_team_membership_store_cache()
+    clear_transcription_processing_locks()
 
 
 def _get_admin_token() -> str:
@@ -77,7 +83,7 @@ def test_fireflies_webhook_accepts_google_meet_transcript(
     assert data["transcript_id"] == "transcript-fireflies-1"
     assert data["is_google_meet"] is True
     assert data["transcript_text_available"] is True
-    assert data["enrichment_status"] == "skipped_missing_api_key"
+    assert data["enrichment_status"] == "completed_payload"
     assert data["stored_record_id"]
 
 
@@ -177,8 +183,112 @@ def test_fireflies_webhook_accepts_valid_hmac_signature(
     assert data["meeting_id"] == "meeting-fireflies-2"
     assert data["event_type"] == "transcription completed"
     assert data["transcript_text_available"] is True
-    assert data["enrichment_status"] == "skipped_missing_api_key"
+    assert data["enrichment_status"] == "completed_payload"
     assert data["stored_record_id"]
+
+
+def test_fireflies_webhook_with_payload_transcript_skips_enrichment_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FIREFLIES_API_KEY", "configured-fireflies-key")
+    get_settings.cache_clear()
+
+    fetch_calls = {"count": 0}
+
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        fireflies_client: object | None = None,
+    ) -> dict[str, object]:
+        fetch_calls["count"] += 1
+        return {
+            "id": meeting_id,
+            "sentences": [{"index": 0, "speaker_name": "Bot", "text": "No deberia usar fetch."}],
+        }
+
+    monkeypatch.setattr(TranscriptionService, "_fetch_fireflies_transcript", fake_fetch)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-fireflies-payload-only-1",
+            "platform": "google_meet",
+            "url": "https://meet.google.com/fireflies-payload-only-1",
+        },
+        "transcript": {
+            "id": "transcript-fireflies-payload-only-1",
+            "text": "Texto ya disponible en webhook Fireflies.",
+        },
+    }
+
+    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["enrichment_status"] == "completed_payload"
+    assert data["transcript_text_available"] is True
+    assert fetch_calls["count"] == 0
+
+
+def test_fireflies_webhook_returns_inflight_duplicate_without_reprocessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sync_calls = {"count": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+    ) -> dict[str, object]:
+        sync_calls["count"] += 1
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {"id": "meeting-fireflies-inflight-duplicate-1"},
+        "transcript": {
+            "id": "transcript-fireflies-inflight-duplicate-1",
+            "text": "Contenido para validar lock de ingestion en Fireflies.",
+        },
+    }
+
+    service = TranscriptionService(get_settings())
+    ingestion_key = service._build_ingestion_key(
+        provider=TranscriptionProvider.fireflies,
+        payload=payload,
+    )
+    assert ingestion_key
+    assert service._try_acquire_ingestion_processing_slot(ingestion_key)
+
+    try:
+        response = service.process_webhook(
+            provider=TranscriptionProvider.fireflies,
+            payload=payload,
+            shared_secret=service.settings.fireflies_webhook_secret or None,
+        )
+    finally:
+        service._release_ingestion_processing_slot(ingestion_key)
+
+    assert response.enrichment_status == "skipped_duplicate_in_progress"
+    assert response.action_items_sync_status == "skipped_duplicate_in_progress"
+    assert sync_calls["count"] == 0
 
 
 def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
@@ -205,7 +315,7 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
     assert data["meeting_id"] == "meeting-read-ai-1"
     assert data["is_google_meet"] is True
     assert data["transcript_text_available"] is True
-    assert data["enrichment_status"] == "skipped_missing_api_key"
+    assert data["enrichment_status"] == "completed_payload"
     assert data["stored_record_id"]
 
     lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-read-ai-1")
@@ -216,6 +326,102 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
         {"name": "Ana", "email": "ana@example.com", "external_id": None, "role": None},
         {"name": "Luis", "email": "luis@example.com", "external_id": None, "role": None},
     ]
+
+
+def test_read_ai_webhook_with_payload_transcript_skips_enrichment_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("READ_AI_API_KEY", "configured-read-ai-key")
+    get_settings.cache_clear()
+
+    fetch_calls = {"count": 0}
+
+    def fake_fetch(
+        self: TranscriptionService,
+        meeting_id: str,
+        read_ai_client: object | None = None,
+    ) -> dict[str, object]:
+        fetch_calls["count"] += 1
+        return {"sentences": [{"text": "No deberia ser necesario."}]}
+
+    monkeypatch.setattr(TranscriptionService, "_fetch_read_ai_transcript", fake_fetch)
+
+    payload = {
+        "event_type": "meeting.completed",
+        "meeting": {
+            "external_id": "meeting-read-ai-payload-only-1",
+            "join_url": "https://meet.google.com/abc-defg-hij",
+        },
+        "summary": {
+            "transcript": "Texto ya disponible desde Read AI webhook.",
+        },
+    }
+
+    response = client.post("/api/transcriptions/webhooks/read-ai", json=payload)
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["enrichment_status"] == "completed_payload"
+    assert data["transcript_text_available"] is True
+    assert fetch_calls["count"] == 0
+
+
+def test_read_ai_webhook_returns_inflight_duplicate_without_reprocessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sync_calls = {"count": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+    ) -> dict[str, object]:
+        sync_calls["count"] += 1
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event_type": "meeting.completed",
+        "meeting": {"external_id": "meeting-read-ai-inflight-duplicate-1"},
+        "summary": {"transcript": "Contenido para validar lock de ingestion."},
+    }
+
+    service = TranscriptionService(get_settings())
+    ingestion_key = service._build_ingestion_key(
+        provider=TranscriptionProvider.read_ai,
+        payload=payload,
+    )
+    assert ingestion_key
+    assert service._try_acquire_ingestion_processing_slot(ingestion_key)
+
+    try:
+        response = service.process_webhook(
+            provider=TranscriptionProvider.read_ai,
+            payload=payload,
+            shared_secret=None,
+        )
+    finally:
+        service._release_ingestion_processing_slot(ingestion_key)
+
+    assert response.enrichment_status == "skipped_duplicate_in_progress"
+    assert response.action_items_sync_status == "skipped_duplicate_in_progress"
+    assert sync_calls["count"] == 0
 
 
 def test_fireflies_webhook_with_user_id_uses_user_settings(
@@ -844,7 +1050,7 @@ def test_webhook_routes_action_items_to_configured_team_recipients(
     assert stored_record["action_items_sync"]["created_count"] == 2
 
 
-def test_webhook_routes_action_items_to_all_active_team_members_when_participant_matches_team(
+def test_webhook_routes_action_items_to_checked_team_recipients_when_participant_matches_team(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_user_store_cache()
@@ -913,6 +1119,9 @@ def test_webhook_routes_action_items_to_all_active_team_members_when_participant
         transcript_sentences: list[dict[str, object]],
         participant_emails: list[str],
         calendar_attendee_emails: list[str] | None = None,
+        skip_google_meeting_items: bool = False,
+        skip_outlook_meeting_items: bool = False,
+        pre_extracted_action_items: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         captured_notion_tokens.append(self.settings.notion_api_token)
         assert meeting_id == "meeting-team-all-members-1"
@@ -950,19 +1159,16 @@ def test_webhook_routes_action_items_to_all_active_team_members_when_participant
     assert response.status_code == 202
     response_payload = response.json()
     assert response_payload["action_items_sync_status"] == "completed"
-    assert response_payload["action_items_created_count"] == 2
-    assert sorted(captured_notion_tokens) == [
-        "lead-all-members-notion-token",
-        "member-all-members-notion-token",
-    ]
+    assert response_payload["action_items_created_count"] == 1
+    assert captured_notion_tokens == ["lead-all-members-notion-token"]
 
     lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-team-all-members-1")
     assert lookup_response.status_code == 200
     stored_record = lookup_response.json()
     assert stored_record["action_items_sync"]["routed_via_team_memberships"] is True
     assert stored_record["action_items_sync"]["matched_team_ids"] == [team_id]
-    assert len(stored_record["action_items_sync"]["target_users"]) == 2
-    assert stored_record["action_items_sync"]["created_count"] == 2
+    assert len(stored_record["action_items_sync"]["target_users"]) == 1
+    assert stored_record["action_items_sync"]["created_count"] == 1
 
 
 def test_webhook_reuses_extracted_action_items_for_team_members(
@@ -1184,7 +1390,7 @@ def test_user_scoped_webhook_routes_to_lead_and_members_with_user_specific_outpu
         name="Equipo Outputs",
         created_by_user_id=lead_user_id,
         # Keep member out of recipient list on purpose: user-scoped webhooks
-        # should still fan out to all accepted team members.
+        # must honor checked recipients only.
         recipient_user_ids=[lead_user_id],
     )
     team_id = str(team["_id"])
@@ -1289,11 +1495,8 @@ def test_user_scoped_webhook_routes_to_lead_and_members_with_user_specific_outpu
     assert response.status_code == 202
     response_payload = response.json()
     assert response_payload["action_items_sync_status"] == "completed"
-    assert response_payload["action_items_created_count"] == 2
-    assert sorted(captured_user_channels) == [
-        ("", "member-outlook-token"),
-        ("lead-google-token", ""),
-    ]
+    assert response_payload["action_items_created_count"] == 1
+    assert captured_user_channels == [("lead-google-token", "")]
 
     lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-lead-user-scope-1")
     assert lookup_response.status_code == 200
@@ -1301,19 +1504,17 @@ def test_user_scoped_webhook_routes_to_lead_and_members_with_user_specific_outpu
     action_items_sync = stored_record["action_items_sync"]
     assert action_items_sync["routed_via_team_memberships"] is True
     assert action_items_sync["matched_team_ids"] == [team_id]
-    assert action_items_sync["created_count"] == 2
+    assert action_items_sync["created_count"] == 1
     assert action_items_sync["google_calendar_created_count"] == 1
-    assert action_items_sync["outlook_calendar_created_count"] == 1
+    assert action_items_sync["outlook_calendar_created_count"] == 0
 
     target_users = {
         target["user_id"]: target
         for target in action_items_sync["target_users"]
     }
-    assert sorted(target_users.keys()) == sorted([lead_user_id, member_user_id])
+    assert sorted(target_users.keys()) == [lead_user_id]
     assert target_users[lead_user_id]["google_calendar_status"] == "completed"
     assert target_users[lead_user_id]["outlook_calendar_status"] == "not_required_no_due_dates"
-    assert target_users[member_user_id]["google_calendar_status"] == "not_required_no_due_dates"
-    assert target_users[member_user_id]["outlook_calendar_status"] == "completed"
 
 
 def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
@@ -1396,6 +1597,9 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
         transcript_sentences: list[dict[str, object]],
         participant_emails: list[str],
         calendar_attendee_emails: list[str] | None = None,
+        skip_google_meeting_items: bool = False,
+        skip_outlook_meeting_items: bool = False,
+        pre_extracted_action_items: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         assert meeting_id == "meeting-team-shared-links-1"
         assert transcript_text == "Agendar reunion semanal del equipo."
@@ -1484,7 +1688,6 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
             "external.shared@example.com",
             "lead.shared@example.com",
             "member.shared@example.com",
-            "pending.shared@example.com",
         ],
     )
     for call in captured_calls:
@@ -1516,7 +1719,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
     assert member_item["outlook_calendar_status"] == "created"
 
 
-def test_user_scoped_webhook_skips_when_lead_disabled_team_activation(
+def test_user_scoped_webhook_falls_back_to_independent_user_when_all_teams_are_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_user_store_cache()
@@ -1627,21 +1830,21 @@ def test_user_scoped_webhook_skips_when_lead_disabled_team_activation(
 
     assert response.status_code == 202
     response_payload = response.json()
-    assert response_payload["action_items_sync_status"] == "skipped_no_active_team_recipients"
-    assert response_payload["action_items_created_count"] == 0
-    assert calls["sync"] == 0
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 1
+    assert calls["sync"] == 1
 
     lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-lead-disabled-team-1")
     assert lookup_response.status_code == 200
     stored_record = lookup_response.json()
     action_items_sync = stored_record["action_items_sync"]
-    assert action_items_sync["routed_via_team_memberships"] is True
-    assert action_items_sync["matched_team_ids"] == [team_id]
+    assert action_items_sync["routed_via_team_memberships"] is False
+    assert action_items_sync["matched_team_ids"] == []
     assert action_items_sync["target_users"] == []
-    assert action_items_sync["created_count"] == 0
+    assert action_items_sync["created_count"] == 1
 
 
-def test_user_scoped_read_ai_webhook_routes_to_lead_and_members(
+def test_user_scoped_read_ai_webhook_routes_only_to_checked_recipients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_user_store_cache()
@@ -1745,11 +1948,8 @@ def test_user_scoped_read_ai_webhook_routes_to_lead_and_members(
     assert response.status_code == 202
     response_payload = response.json()
     assert response_payload["action_items_sync_status"] == "completed"
-    assert response_payload["action_items_created_count"] == 2
-    assert sorted(captured_notion_tokens) == [
-        "lead-readai-notion-token",
-        "member-readai-notion-token",
-    ]
+    assert response_payload["action_items_created_count"] == 1
+    assert captured_notion_tokens == ["lead-readai-notion-token"]
 
     lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-read-ai-team-routing-1")
     assert lookup_response.status_code == 200
@@ -1757,8 +1957,8 @@ def test_user_scoped_read_ai_webhook_routes_to_lead_and_members(
     action_items_sync = stored_record["action_items_sync"]
     assert action_items_sync["routed_via_team_memberships"] is True
     assert action_items_sync["matched_team_ids"] == [team_id]
-    assert len(action_items_sync["target_users"]) == 2
-    assert action_items_sync["created_count"] == 2
+    assert len(action_items_sync["target_users"]) == 1
+    assert action_items_sync["created_count"] == 1
 
 
 def test_fireflies_webhook_infers_second_participant_from_speakers_when_email_is_missing(

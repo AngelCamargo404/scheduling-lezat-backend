@@ -392,27 +392,16 @@ class TeamMembershipService:
                 if str(membership.get("user_id", "")).strip()
                 and bool(membership.get("is_active", True))
             }
-            active_lead_user_ids = [
-                str(membership.get("user_id", "")).strip()
-                for membership in accepted_memberships
-                if (
-                    str(membership.get("role", "")).strip() == "lead"
-                    and str(membership.get("user_id", "")).strip()
-                    and bool(membership.get("is_active", True))
-                )
-            ]
+            configured_recipient_user_ids = {
+                user_id.strip()
+                for user_id in matched_team.get("recipient_user_ids", [])
+                if isinstance(user_id, str) and user_id.strip()
+            }
             if normalized_lead_user_id:
                 lead_membership = membership_by_user_id.get(normalized_lead_user_id)
                 if lead_membership and not bool(lead_membership.get("is_active", True)):
                     continue
-                configured_recipients = sorted(active_accepted_user_ids)
-            else:
-                # For participant-based webhook routing, fan out to all active
-                # accepted team members (lead + members), not only configured
-                # recipients. This keeps note creation consistent across team.
-                configured_recipients = sorted(active_accepted_user_ids)
-                if not configured_recipients:
-                    configured_recipients = active_lead_user_ids
+            configured_recipients = sorted(configured_recipient_user_ids & active_accepted_user_ids)
             if not configured_recipients:
                 continue
             recipient_user_ids.update(configured_recipients)
