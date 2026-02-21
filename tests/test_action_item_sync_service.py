@@ -186,6 +186,59 @@ def test_sync_uses_scheduled_start_for_calendar_creation() -> None:
     assert fake_google.calls == 1
 
 
+def test_sync_uses_team_leader_timezone_for_naive_scheduled_meetings() -> None:
+    class _FakeGeminiMeetingClient:
+        def extract_action_items(
+            self,
+            *,
+            meeting_id: str | None,
+            transcript_text: str | None,
+            transcript_sentences: list[dict[str, object]],
+            participant_emails: list[str],
+        ) -> list[ActionItem]:
+            return [
+                ActionItem(
+                    title="Agendar seguimiento",
+                    scheduled_start="2026-02-19T11:00:00",
+                    online_meeting_platform="google_meet",
+                    event_timezone=None,
+                ),
+            ]
+
+    class _FakeGoogleCalendarClientWithTimezoneAssertion:
+        def create_due_date_event_with_details(
+            self,
+            *,
+            item: ActionItem,
+            meeting_id: str | None,
+            attendee_emails: list[str] | None = None,
+        ) -> dict[str, str | None]:
+            assert item.event_timezone == "America/Bogota"
+            return {
+                "event_id": "google-event-timezone",
+                "google_meet_link": "https://meet.google.com/timezone",
+            }
+
+    service = ActionItemSyncService(
+        settings=Settings(team_leader_timezone="America/Bogota"),
+        gemini_client=_FakeGeminiMeetingClient(),
+        notion_client=None,
+        monday_kanban_client=_FakeMondayClient(),
+        google_calendar_client=_FakeGoogleCalendarClientWithTimezoneAssertion(),
+        outlook_calendar_client=None,
+    )
+
+    result = service.sync(
+        meeting_id="meeting-timezone-1",
+        transcript_text="Agendar seguimiento todos los jueves a las 11.",
+        transcript_sentences=[],
+        participant_emails=[],
+    )
+
+    assert result["status"] == "completed"
+    assert result["items"][0]["event_timezone"] == "America/Bogota"
+
+
 def test_sync_creates_events_for_explicit_teams_meeting_when_both_calendars_enabled() -> None:
     class _FakeGeminiTeamsMeetingClient:
         def extract_action_items(

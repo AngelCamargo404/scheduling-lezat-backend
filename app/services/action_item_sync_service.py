@@ -169,6 +169,7 @@ class ActionItemSyncService:
                 error=None,
             )
         action_items = self._apply_test_due_date(action_items)
+        action_items = self._apply_team_leader_timezone_to_meeting_action_items(action_items)
 
         created_count = 0
         notion_created_count = 0
@@ -504,7 +505,7 @@ class ActionItemSyncService:
             client_secret=self.settings.google_calendar_client_secret,
             calendar_id=self.settings.google_calendar_id,
             timeout_seconds=self.settings.google_calendar_api_timeout_seconds,
-            default_timezone=self.settings.google_calendar_event_timezone,
+            default_timezone=self._normalize_team_leader_timezone(),
         )
 
     def _create_outlook_calendar_client(self) -> OutlookCalendarClient | None:
@@ -519,8 +520,37 @@ class ActionItemSyncService:
             client_secret=self.settings.outlook_client_secret,
             tenant_id=self.settings.outlook_tenant_id,
             timeout_seconds=self.settings.google_calendar_api_timeout_seconds,
-            default_timezone=self.settings.outlook_calendar_event_timezone,
+            default_timezone=self._normalize_team_leader_timezone(),
         )
+
+    def _normalize_team_leader_timezone(self) -> str:
+        raw_timezone = self.settings.team_leader_timezone.strip()
+        return raw_timezone or "America/Bogota"
+
+    def _apply_team_leader_timezone_to_meeting_action_items(
+        self,
+        action_items: list[ActionItem],
+    ) -> list[ActionItem]:
+        timezone_name = self._normalize_team_leader_timezone()
+        for item in action_items:
+            if not isinstance(item, ActionItem):
+                continue
+            if not item.scheduled_start:
+                continue
+            if not self._is_naive_iso_datetime(item.scheduled_start):
+                continue
+            item.event_timezone = timezone_name
+        return action_items
+
+    def _is_naive_iso_datetime(self, raw_value: str) -> bool:
+        cleaned = raw_value.strip()
+        if not cleaned:
+            return False
+        try:
+            parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return parsed.tzinfo is None
 
     def _create_google_calendar_event(
         self,

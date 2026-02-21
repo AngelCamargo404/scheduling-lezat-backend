@@ -273,7 +273,11 @@ class MondayKanbanClient:
         if column_type not in {"people", "multiple-person", "person"}:
             return
 
-        user_id = self._find_user_id_by_email(item.assignee_email)
+        try:
+            # Best effort: if the account token cannot read `users`, still create the item.
+            user_id = self._find_user_id_by_email(item.assignee_email)
+        except MondayKanbanError:
+            return
         if not user_id:
             return
         try:

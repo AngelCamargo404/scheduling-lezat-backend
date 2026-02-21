@@ -992,6 +992,7 @@ class TranscriptionService:
         force_disable_outlook_calendar: bool = False,
         skip_google_meeting_items: bool = False,
         skip_outlook_meeting_items: bool = False,
+        timezone_owner_user_id: str | None = None,
         pre_extracted_action_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.action_item_sync_service:
@@ -1050,6 +1051,19 @@ class TranscriptionService:
                         "outlook_calendar_api_token": "",
                         "outlook_calendar_refresh_token": "",
                     },
+                )
+            normalized_timezone_owner_user_id = (timezone_owner_user_id or "").strip()
+            if normalized_timezone_owner_user_id:
+                timezone_owner_settings = self._resolve_settings_for_user_id(
+                    normalized_timezone_owner_user_id,
+                )
+                timezone_value = (
+                    timezone_owner_settings.team_leader_timezone.strip()
+                    or "America/Bogota"
+                )
+                effective_settings = self._override_settings(
+                    effective_settings,
+                    {"team_leader_timezone": timezone_value},
                 )
             sync_service = ActionItemSyncService(effective_settings)
         if not effective_settings.transcription_autosync_enabled:
@@ -1215,6 +1229,10 @@ class TranscriptionService:
                 preferred_outlook_owner_user_id,
             ],
         )
+        timezone_owner_user_id = self._resolve_team_timezone_owner_user_id(
+            matched_team_ids=matched_team_ids,
+            preferred_lead_user_id=user_settings_user_id,
+        )
         google_owner_user_id: str | None = None
         outlook_owner_user_id: str | None = None
         google_owner_created_count = 0
@@ -1252,6 +1270,7 @@ class TranscriptionService:
                 calendar_attendee_emails=calendar_attendee_emails,
                 skip_google_meeting_items=skip_google_meeting_items,
                 skip_outlook_meeting_items=skip_outlook_meeting_items,
+                timezone_owner_user_id=timezone_owner_user_id,
                 pre_extracted_action_items=shared_pre_extracted_action_items,
             )
             raw_user_runs.append(
@@ -1534,6 +1553,58 @@ class TranscriptionService:
             if google_owner_user_id and outlook_owner_user_id:
                 break
         return google_owner_user_id, outlook_owner_user_id
+
+    def _resolve_team_timezone_owner_user_id(
+        self,
+        *,
+        matched_team_ids: list[str],
+        preferred_lead_user_id: str | None = None,
+    ) -> str | None:
+        normalized_preferred_lead_user_id = (preferred_lead_user_id or "").strip()
+        if not matched_team_ids:
+            return normalized_preferred_lead_user_id or None
+
+        team_membership_service = self._get_team_membership_service()
+        team_store = (
+            team_membership_service.team_store
+            if team_membership_service and hasattr(team_membership_service, "team_store")
+            else None
+        )
+        if not team_store:
+            return normalized_preferred_lead_user_id or None
+
+        if normalized_preferred_lead_user_id:
+            for team_id in matched_team_ids:
+                memberships = team_store.list_memberships_for_team(team_id, status="accepted")
+                for membership in memberships:
+                    membership_user_id = self._to_text(membership.get("user_id"))
+                    membership_role = (self._to_text(membership.get("role")) or "").lower()
+                    membership_active = bool(membership.get("is_active", True))
+                    if (
+                        membership_user_id == normalized_preferred_lead_user_id
+                        and membership_role == "lead"
+                        and membership_active
+                    ):
+                        return normalized_preferred_lead_user_id
+
+        for team_id in matched_team_ids:
+            memberships = team_store.list_memberships_for_team(team_id, status="accepted")
+            active_lead_user_ids = sorted(
+                {
+                    self._to_text(membership.get("user_id")) or ""
+                    for membership in memberships
+                    if (
+                        (self._to_text(membership.get("role")) or "").lower() == "lead"
+                        and bool(membership.get("is_active", True))
+                        and (self._to_text(membership.get("user_id")) or "").strip()
+                    )
+                },
+            )
+            for lead_user_id in active_lead_user_ids:
+                if lead_user_id:
+                    return lead_user_id
+
+        return normalized_preferred_lead_user_id or None
 
     def _prioritize_user_ids(
         self,

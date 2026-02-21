@@ -147,6 +147,76 @@ def test_monday_kanban_client_lists_status_options_from_board_columns(
     assert payload["options"] == ["Por hacer", "En curso"]
 
 
+def test_monday_kanban_client_skips_assignee_when_users_query_is_not_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_create_variables: dict[str, object] = {}
+
+    def fake_urlopen(req, timeout=10):  # type: ignore[no-untyped-def]
+        query, variables = _parse_graphql_request(req)
+        if "boards(ids" in query:
+            return _MockResponse(
+                {
+                    "data": {
+                        "boards": [
+                            {
+                                "id": "1234567890",
+                                "groups": [{"id": "topics", "title": "Main"}],
+                                "columns": [
+                                    {
+                                        "id": "status",
+                                        "title": "Status",
+                                        "type": "status",
+                                        "settings_str": "{\"labels\":{\"0\":\"Working on it\"}}",
+                                    },
+                                    {
+                                        "id": "person",
+                                        "title": "Owner",
+                                        "type": "people",
+                                        "settings_str": "{}",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            )
+        if "users(limit" in query:
+            return _MockResponse(
+                {
+                    "errors": [
+                        {
+                            "message": "User is not authorized to perform this action.",
+                        },
+                    ],
+                },
+            )
+        if "create_item" in query:
+            captured_create_variables.update(variables)
+            return _MockResponse({"data": {"create_item": {"id": "item-2"}}})
+        raise AssertionError(f"Unexpected Monday query: {query}")
+
+    monkeypatch.setattr("app.services.monday_kanban_client.request.urlopen", fake_urlopen)
+
+    client = MondayKanbanClient(
+        api_token="monday-token",
+        board_id="1234567890",
+        group_id="topics",
+        assignee_column_id="person",
+    )
+    item_id = client.create_kanban_item(
+        item=ActionItem(
+            title="Asignar seguimiento",
+            assignee_email="owner@example.com",
+        ),
+        meeting_id="meeting-456",
+    )
+
+    assert item_id == "item-2"
+    column_values = json.loads(str(captured_create_variables["column_values"]))
+    assert "person" not in column_values
+
+
 def test_monday_kanban_client_raises_error_when_graphql_returns_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

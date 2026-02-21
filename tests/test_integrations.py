@@ -136,6 +136,13 @@ def test_integrations_settings_for_admin_are_seeded_from_environment(
     )
     assert autosync_field["configured"] is True
     assert autosync_field["value"] == "true"
+    team_timezone_field = next(
+        field
+        for field in fireflies_group["fields"]
+        if field["env_var"] == "TEAM_LEADER_TIMEZONE"
+    )
+    assert team_timezone_field["configured"] is True
+    assert team_timezone_field["value"] == "America/Bogota"
 
     oauth_notion_group = next(group for group in payload["groups"] if group["id"] == "oauth_notion")
     notion_redirect_field = next(
@@ -195,6 +202,16 @@ def test_integrations_settings_patch_updates_only_current_user(client: TestClien
         headers={"Authorization": f"Bearer {user_token}"},
     )
     assert user_settings_response.status_code == 200
+    user_fireflies_group = next(
+        group for group in user_settings_response.json()["groups"] if group["id"] == "fireflies"
+    )
+    user_timezone_field = next(
+        field
+        for field in user_fireflies_group["fields"]
+        if field["env_var"] == "TEAM_LEADER_TIMEZONE"
+    )
+    assert user_timezone_field["configured"] is True
+    assert user_timezone_field["value"] == "America/Bogota"
     user_notion_group = next(
         group for group in user_settings_response.json()["groups"] if group["id"] == "notion_sync"
     )
@@ -230,6 +247,20 @@ def test_integrations_settings_patch_validates_values(client: TestClient) -> Non
         headers={"Authorization": f"Bearer {token}"},
     )
     assert invalid_date_response.status_code == 422
+
+    invalid_timezone_response = client.patch(
+        "/api/integrations/settings",
+        json={"values": {"TEAM_LEADER_TIMEZONE": "America/NoExiste"}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert invalid_timezone_response.status_code == 422
+
+    empty_timezone_response = client.patch(
+        "/api/integrations/settings",
+        json={"values": {"TEAM_LEADER_TIMEZONE": ""}},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert empty_timezone_response.status_code == 422
 
 
 def test_integrations_settings_patch_normalizes_transcription_autosync_toggle(
@@ -520,8 +551,32 @@ def test_monday_connect_redirects_to_monday_oauth(
     assert response.status_code == 302
     location = response.headers["location"]
     assert location.startswith("https://auth.monday.com/oauth2/authorize?")
-    assert "client_id=monday-client-id" in location
-    assert "scope=boards%3Aread+boards%3Awrite+users%3Aread" in location
+    query = parse_qs(urlparse(location).query)
+    assert query.get("client_id") == ["monday-client-id"]
+    assert "scope" not in query
+    assert query.get("force_install_if_needed") == ["true"]
+
+
+def test_monday_callback_invalid_scope_includes_install_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+) -> None:
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:3000")
+    clear_user_store_cache()
+    get_settings.cache_clear()
+
+    response = client.get(
+        "/api/integrations/monday/callback?error=invalid_scope&error_description=Invalid%20scope%20param",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert location.startswith("http://localhost:3000/configuracion?")
+    query = parse_qs(urlparse(location).query)
+    assert query.get("monday_oauth") == ["error"]
+    message = query.get("monday_oauth_message", [""])[0]
+    assert "instalar primero la app publica de Monday" in message
 
 
 def test_monday_callback_stores_access_token_per_user(

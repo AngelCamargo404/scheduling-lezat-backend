@@ -7,6 +7,7 @@ from datetime import date
 import secrets
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
@@ -41,7 +42,6 @@ _OUTLOOK_OAUTH_AUTHORIZE_URL_TEMPLATE = "https://login.microsoftonline.com/{tena
 _OUTLOOK_OAUTH_TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 _MONDAY_OAUTH_AUTHORIZE_URL = "https://auth.monday.com/oauth2/authorize"
 _MONDAY_OAUTH_TOKEN_URL = "https://auth.monday.com/oauth2/token"
-_MONDAY_OAUTH_SCOPES = "boards:read boards:write users:read"
 _OUTLOOK_GRAPH_SCOPES = (
     "offline_access "
     "https://graph.microsoft.com/User.Read "
@@ -69,33 +69,33 @@ class IntegrationSettingGroupDefinition:
 GROUP_DEFINITIONS = (
     IntegrationSettingGroupDefinition(
         id="fireflies",
-        title="Fireflies AI",
-        description="Recepcion y enriquecimiento de transcripciones desde Fireflies.",
+        title="Transcripciones con Fireflies",
+        description="Conexion principal para recibir transcripciones de reuniones.",
     ),
     IntegrationSettingGroupDefinition(
         id="read_ai",
-        title="Read AI",
-        description="Webhook alternativo para ingestion de reuniones.",
+        title="Transcripciones con Read AI",
+        description="Proveedor alternativo para recibir transcripciones.",
     ),
     IntegrationSettingGroupDefinition(
         id="gemini",
-        title="Gemini",
-        description="Extraccion de tareas accionables desde transcripciones.",
+        title="Procesamiento con Gemini",
+        description="Analiza transcripciones y detecta tareas accionables.",
     ),
     IntegrationSettingGroupDefinition(
         id="notion_sync",
-        title="Notion Sync (token)",
-        description="Creacion de notas/tareas en Notion con token de integracion.",
+        title="Salida a Notion",
+        description="Configuracion para crear tareas automaticamente en Notion.",
     ),
     IntegrationSettingGroupDefinition(
         id="monday_sync",
-        title="Monday Sync (token)",
-        description="Creacion de notas/tareas en Monday con token OAuth por usuario.",
+        title="Salida a Monday",
+        description="Configuracion para crear tareas automaticamente en Monday.",
     ),
     IntegrationSettingGroupDefinition(
         id="google_calendar_sync",
-        title="Google Calendar Sync (token)",
-        description="Creacion de eventos por fechas de entrega detectadas.",
+        title="Salida a Google Calendar",
+        description="Configuracion para crear eventos automaticamente en Google Calendar.",
     ),
     IntegrationSettingGroupDefinition(
         id="oauth_notion",
@@ -127,16 +127,16 @@ GROUP_DEFINITIONS = (
 FIELD_DEFINITIONS = (
     IntegrationSettingFieldDefinition(
         env_var="FIREFLIES_API_KEY",
-        label="Fireflies API Key",
-        description="Token para consultar transcripcion completa por meetingId.",
+        label="Clave de acceso de Fireflies",
+        description="Permite obtener el detalle completo de cada reunion transcrita.",
         group="fireflies",
         sensitive=True,
         required_for=("fireflies_transcript_enrichment", "notion_notes_creation"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="FIREFLIES_WEBHOOK_SECRET",
-        label="Fireflies Webhook Secret",
-        description="Secreto compartido para validar firma HMAC del webhook.",
+        label="Clave de seguridad del webhook",
+        description="Protege la recepcion de eventos y evita envios no autorizados.",
         group="fireflies",
         sensitive=True,
     ),
@@ -160,8 +160,8 @@ FIELD_DEFINITIONS = (
     ),
     IntegrationSettingFieldDefinition(
         env_var="READ_AI_API_KEY",
-        label="Read AI API Key",
-        description="Token para consultar detalles de reuniones en Read AI.",
+        label="Clave de acceso de Read AI",
+        description="Permite consultar el detalle de reuniones en Read AI.",
         group="read_ai",
         sensitive=True,
         required_for=("read_ai_transcript_enrichment",),
@@ -174,10 +174,19 @@ FIELD_DEFINITIONS = (
     ),
     IntegrationSettingFieldDefinition(
         env_var="TRANSCRIPTION_AUTOSYNC_ENABLED",
-        label="Transcription Autosync Enabled",
+        label="Automatizacion de notas y eventos",
         description=(
-            "Habilita o deshabilita la creacion automatica de notas y eventos "
-            "a partir de transcripciones."
+            "Activa o desactiva la creacion automatica de notas y eventos "
+            "a partir de nuevas transcripciones."
+        ),
+        group="fireflies",
+    ),
+    IntegrationSettingFieldDefinition(
+        env_var="TEAM_LEADER_TIMEZONE",
+        label="Zona horaria del lider de equipo",
+        description=(
+            "Zona horaria base para interpretar horas de reuniones programadas "
+            "desde transcripciones."
         ),
         group="fireflies",
     ),
@@ -203,40 +212,40 @@ FIELD_DEFINITIONS = (
     ),
     IntegrationSettingFieldDefinition(
         env_var="NOTION_API_TOKEN",
-        label="Notion API Token",
-        description="Token de integracion para crear tareas en base Notion.",
+        label="Acceso de Notion",
+        description="Permiso para crear tareas en tu espacio de Notion.",
         group="notion_sync",
         sensitive=True,
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="NOTION_TASKS_DATABASE_ID",
-        label="Notion Tasks Database ID",
-        description="Database ID del kanban de tareas.",
+        label="Base de datos donde se guardaran las tareas",
+        description="Base de Notion donde se crearan las tareas nuevas.",
         group="notion_sync",
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="NOTION_TASK_STATUS_PROPERTY",
-        label="Status Property",
-        description="Nombre de propiedad de estado en Notion.",
+        label="Columna de estado",
+        description="Columna de Notion que define el estado de cada tarea.",
         group="notion_sync",
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="NOTION_KANBAN_TODO_STATUS",
-        label="To-do Status Option",
+        label="Estado inicial para tareas nuevas",
         description=(
-            "Nombre exacto de la opcion de estado/select usada al crear tareas "
-            "(por ejemplo: Por hacer, Not started)."
+            "Estado que se asignara cuando Lezat cree una tarea nueva "
+            "(por ejemplo: Por hacer o Not started)."
         ),
         group="notion_sync",
         required_for=("notion_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="MONDAY_API_TOKEN",
-        label="Monday API Token",
-        description="Access token OAuth para crear tareas en Monday.",
+        label="Acceso de Monday",
+        description="Permiso para crear tareas en tu espacio de Monday.",
         group="monday_sync",
         sensitive=True,
         required_for=("monday_notes_creation", "google_calendar_due_date_events"),
@@ -255,29 +264,29 @@ FIELD_DEFINITIONS = (
     ),
     IntegrationSettingFieldDefinition(
         env_var="MONDAY_BOARD_ID",
-        label="Monday Board ID",
-        description="Board ID del kanban de tareas en Monday.",
+        label="Tablero donde se crearan las tareas",
+        description="Tablero de Monday donde se publicaran las tareas nuevas.",
         group="monday_sync",
         required_for=("monday_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="MONDAY_GROUP_ID",
-        label="Monday Group ID",
-        description="Group ID dentro del board donde se crean los items.",
+        label="Grupo donde se publicaran las tareas",
+        description="Grupo del tablero donde se creara cada tarea.",
         group="monday_sync",
         required_for=("monday_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="MONDAY_STATUS_COLUMN_ID",
-        label="Monday Status Column ID",
-        description="Column ID tipo status/dropdown para estado inicial del item.",
+        label="Columna de estado",
+        description="Columna que guarda el estado de cada tarea en Monday.",
         group="monday_sync",
         required_for=("monday_notes_creation", "google_calendar_due_date_events"),
     ),
     IntegrationSettingFieldDefinition(
         env_var="MONDAY_KANBAN_TODO_STATUS",
-        label="Monday To-do Status Label",
-        description="Etiqueta de estado inicial en Monday (ejemplo: Working on it).",
+        label="Estado inicial para tareas nuevas",
+        description="Estado con el que se crearan las tareas nuevas (por ejemplo: Working on it).",
         group="monday_sync",
         required_for=("monday_notes_creation", "google_calendar_due_date_events"),
     ),
@@ -502,6 +511,7 @@ URL_ENV_VARS = frozenset(
 CSV_URL_ENV_VARS = frozenset({"ALLOWED_ORIGINS"})
 ENUM_ENV_VARS: dict[str, set[str]] = {}
 ENUM_ENV_VARS["TRANSCRIPTION_AUTOSYNC_ENABLED"] = {"true", "false"}
+TIMEZONE_ENV_VARS = frozenset({"TEAM_LEADER_TIMEZONE"})
 
 
 @router.get("/notion/connect")
@@ -743,7 +753,7 @@ def start_monday_oauth(
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": _MONDAY_OAUTH_SCOPES,
+            "force_install_if_needed": "true",
             "state": state_token,
         },
     )
@@ -755,10 +765,14 @@ def finish_monday_oauth(
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
+    error_description: str | None = Query(default=None),
 ) -> RedirectResponse:
     settings = get_settings()
     if error:
-        return _build_monday_oauth_redirect("error", error)
+        return _build_monday_oauth_redirect(
+            "error",
+            _normalize_monday_oauth_error_message(error, error_description),
+        )
     if not code or not state:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1387,7 +1401,12 @@ def _read_current_user_values(current_user: CurrentUserResponse) -> dict[str, st
             if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED":
                 values[env_var] = "true"
                 continue
+            if env_var == "TEAM_LEADER_TIMEZONE":
+                values[env_var] = settings.team_leader_timezone.strip() or "America/Bogota"
+                continue
             values[env_var] = ""
+    if not values.get("TEAM_LEADER_TIMEZONE", "").strip():
+        values["TEAM_LEADER_TIMEZONE"] = settings.team_leader_timezone.strip() or "America/Bogota"
     return values
 
 
@@ -1449,6 +1468,11 @@ def _normalize_updates(raw_values: dict[str, str]) -> dict[str, str]:
         normalized_value = (raw_value or "").strip()
         if env_var == "TRANSCRIPTION_AUTOSYNC_ENABLED" and normalized_value:
             normalized_value = _normalize_boolean_text(normalized_value)
+        if env_var == "TEAM_LEADER_TIMEZONE" and not normalized_value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="TEAM_LEADER_TIMEZONE is required and cannot be empty.",
+            )
         updates[env_var] = normalized_value
     return updates
 
@@ -1459,6 +1483,8 @@ def _validate_updates(updates: dict[str, str]) -> None:
             _assert_positive_float(env_var, value)
         if env_var in POSITIVE_INT_ENV_VARS and value:
             _assert_positive_int(env_var, value)
+        if env_var in TIMEZONE_ENV_VARS and value:
+            _assert_iana_timezone(env_var, value)
         if env_var in URL_ENV_VARS and value:
             _assert_url(env_var, value)
         if env_var in CSV_URL_ENV_VARS and value:
@@ -1512,6 +1538,24 @@ def _assert_url(env_var: str, value: str) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"{env_var} must be a valid http/https URL.",
         )
+
+
+def _assert_iana_timezone(env_var: str, value: str) -> None:
+    cleaned = value.strip()
+    if not cleaned:
+        return
+    if cleaned.upper() in {"UTC", "GMT"}:
+        return
+    try:
+        ZoneInfo(cleaned)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"{env_var} must be a valid IANA timezone "
+                "(for example: America/Mexico_City)."
+            ),
+        ) from exc
 
 
 def _assert_iso_date(env_var: str, value: str) -> None:
@@ -1836,6 +1880,24 @@ def _build_monday_oauth_redirect(status_value: str, message: str) -> RedirectRes
     return RedirectResponse(url=f"{frontend_base_url}/configuracion?{query}", status_code=302)
 
 
+def _normalize_monday_oauth_error_message(error: str, description: str | None) -> str:
+    normalized_error = error.strip().lower()
+    normalized_description = (description or "").strip()
+    if normalized_error == "invalid_scope":
+        if normalized_description:
+            return (
+                f"{normalized_description}. "
+                "Un admin de la cuenta destino debe instalar primero la app publica de Monday "
+                "y luego reintentar la conexion."
+            )
+        return (
+            "Invalid scope param. "
+            "Un admin de la cuenta destino debe instalar primero la app publica de Monday "
+            "y luego reintentar la conexion."
+        )
+    return normalized_description or error
+
+
 def _build_google_calendar_oauth_redirect(status_value: str, message: str) -> RedirectResponse:
     frontend_base_url = get_settings().frontend_base_url.rstrip("/")
     query = urlencode(
@@ -1903,5 +1965,3 @@ def _resolve_outlook_oauth_config(
     tenant_id = env_values.get("OUTLOOK_TENANT_ID", "").strip() or settings.outlook_tenant_id.strip()
     redirect_uri = env_values.get("OUTLOOK_REDIRECT_URI", "").strip() or settings.outlook_redirect_uri.strip()
     return client_id, client_secret, tenant_id, redirect_uri
-
-

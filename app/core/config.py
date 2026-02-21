@@ -34,6 +34,7 @@ ALLOWED_ENV_FIELD_NAMES = frozenset(
         "google_calendar_event_timezone",
         "google_calendar_id",
         "google_calendar_api_timeout_seconds",
+        "team_leader_timezone",
         "outlook_client_id",
         "outlook_client_secret",
         "outlook_tenant_id",
@@ -169,6 +170,7 @@ class Settings(BaseSettings):
     google_calendar_id: str = "primary"
     google_calendar_api_timeout_seconds: float = 10.0
     google_calendar_event_timezone: str = "UTC"
+    team_leader_timezone: str = "America/Bogota"
     outlook_client_id: str = ""
     outlook_client_secret: str = ""
     outlook_tenant_id: str = "common"

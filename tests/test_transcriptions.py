@@ -1347,6 +1347,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
             "NOTION_API_TOKEN": "lead-notion-token",
             "GOOGLE_CALENDAR_API_TOKEN": "lead-google-token",
             "OUTLOOK_CALENDAR_API_TOKEN": "lead-outlook-token",
+            "TEAM_LEADER_TIMEZONE": "America/Mexico_City",
             "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
         },
     )
@@ -1356,6 +1357,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
             "NOTION_API_TOKEN": "member-notion-token",
             "GOOGLE_CALENDAR_API_TOKEN": "member-google-token",
             "OUTLOOK_CALENDAR_API_TOKEN": "member-outlook-token",
+            "TEAM_LEADER_TIMEZONE": "Europe/Madrid",
             "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
         },
     )
@@ -1403,6 +1405,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
                 "notion": self.settings.notion_api_token,
                 "google": self.settings.google_calendar_api_token,
                 "outlook": self.settings.outlook_calendar_api_token,
+                "team_timezone": self.settings.team_leader_timezone,
                 "attendees": sorted(calendar_attendee_emails or []),
             },
         )
@@ -1486,6 +1489,7 @@ def test_user_scoped_webhook_shares_meeting_links_for_team_and_invites_members(
     )
     for call in captured_calls:
         assert call["attendees"] == expected_attendees
+        assert call["team_timezone"] == "America/Mexico_City"
     assert any(
         call["google"] == "lead-google-token" and call["outlook"] == "lead-outlook-token"
         for call in captured_calls

@@ -162,9 +162,11 @@ http://localhost:8000/api/health
 - El almacenamiento de usuarios, configuraciones e historico de transcripciones se gestiona en MongoDB y no se expone para edicion desde la interfaz de integraciones.
 - Los valores sensibles no se devuelven en texto plano desde el endpoint de settings (`value=null` para campos sensibles).
 - Fireflies es obligatorio para operar los flujos de transcripcion.
+- Debes definir `TEAM_LEADER_TIMEZONE` para interpretar horarios de reuniones programadas desde transcripciones (por defecto `America/Bogota`).
 - Ademas de Fireflies, debes conectar al menos una salida: Google Calendar, Notion Kanban o Monday Kanban.
 - Si usas Notion, debes completar Database ID y los datos clave de integracion (token, permisos y mapeos/campos requeridos por el flujo).
 - Si usas Monday, debes completar Board ID, Group ID y los datos clave de integracion (token OAuth, columna de estado y mapeos/campos requeridos por el flujo).
+- Para cuentas Monday externas al workspace donde se creo la app, un admin debe instalar primero la app publica (link `response_type=install`) y luego autorizar OAuth desde `/api/integrations/monday/connect`.
 
 ## Webhooks de transcripciones
 - Los endpoints reciben JSON crudo y normalizan campos clave (meeting id, provider, plataforma y disponibilidad de transcript).
