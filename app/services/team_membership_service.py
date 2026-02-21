@@ -347,16 +347,31 @@ class TeamMembershipService:
             # Webhooks scoped by /{user_id} should still route to the lead's team
             # even when participant emails are missing or external-only.
             matched_teams = self._list_teams_led_by_user(normalized_lead_user_id)
-        if not matched_teams:
-            return [], []
+        recipient_user_ids, matched_team_ids = self._collect_active_recipients_from_teams(matched_teams)
+        if recipient_user_ids or matched_team_ids:
+            return recipient_user_ids, matched_team_ids
 
+        if normalized_lead_user_id:
+            # If participant matching only produced disabled teams, retry with all
+            # teams led by the scoped user so enabled teams still receive notes.
+            lead_teams = self._list_teams_led_by_user(normalized_lead_user_id)
+            return self._collect_active_recipients_from_teams(lead_teams)
+
+        return [], []
+
+    def _collect_active_recipients_from_teams(
+        self,
+        teams: list[dict[str, object]],
+    ) -> tuple[list[str], list[str]]:
+        if not teams:
+            return [], []
         matched_team_ids: list[str] = []
         recipient_user_ids: set[str] = set()
-        for matched_team in matched_teams:
-            team_id = str(matched_team.get("_id", "")).strip()
+        for team in teams:
+            team_id = str(team.get("_id", "")).strip()
             if not team_id:
                 continue
-            if not bool(matched_team.get("is_active", True)):
+            if not bool(team.get("is_active", True)):
                 continue
             matched_team_ids.append(team_id)
             accepted_memberships = self.team_store.list_memberships_for_team(team_id, status="accepted")
@@ -368,13 +383,12 @@ class TeamMembershipService:
             }
             configured_recipient_user_ids = {
                 user_id.strip()
-                for user_id in matched_team.get("recipient_user_ids", [])
+                for user_id in team.get("recipient_user_ids", [])
                 if isinstance(user_id, str) and user_id.strip()
             }
             configured_recipients = sorted(configured_recipient_user_ids & active_accepted_user_ids)
-            if not configured_recipients:
-                continue
-            recipient_user_ids.update(configured_recipients)
+            if configured_recipients:
+                recipient_user_ids.update(configured_recipients)
 
         return sorted(recipient_user_ids), sorted(set(matched_team_ids))
 

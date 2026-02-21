@@ -1840,6 +1840,268 @@ def test_user_scoped_webhook_falls_back_to_independent_user_when_all_teams_are_d
     assert action_items_sync["created_count"] == 1
 
 
+def test_user_scoped_webhook_uses_enabled_lead_team_when_participant_matches_disabled_team(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.mixed@example.com",
+        full_name="Lead Mixed",
+        password_hash="hashed",
+        role="user",
+    )
+    disabled_member = user_store.create_user(
+        email="member.disabled.team@example.com",
+        full_name="Disabled Team Member",
+        password_hash="hashed",
+        role="user",
+    )
+    enabled_member = user_store.create_user(
+        email="member.enabled.team@example.com",
+        full_name="Enabled Team Member",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+    disabled_member_user_id = str(disabled_member["_id"])
+    enabled_member_user_id = str(enabled_member["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-mixed-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    disabled_team = team_store.create_team(
+        name="Equipo Deshabilitado Mixed",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id, disabled_member_user_id],
+    )
+    disabled_team_id = str(disabled_team["_id"])
+    team_store.upsert_membership(
+        team_id=disabled_team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=disabled_team_id,
+        user_id=disabled_member_user_id,
+        role="member",
+        status="accepted",
+    )
+    team_store.set_team_activation(disabled_team_id, False)
+
+    enabled_team = team_store.create_team(
+        name="Equipo Habilitado Mixed",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id],
+    )
+    enabled_team_id = str(enabled_team["_id"])
+    team_store.upsert_membership(
+        team_id=enabled_team_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+    team_store.upsert_membership(
+        team_id=enabled_team_id,
+        user_id=enabled_member_user_id,
+        role="member",
+        status="accepted",
+    )
+
+    calls = {"sync": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        calls["sync"] += 1
+        assert self.settings.notion_api_token == "lead-mixed-notion-token"
+        assert meeting_id == "meeting-mixed-team-routing-1"
+        assert transcript_text == "Debe usar el equipo habilitado del lider."
+        assert participant_emails == ["member.disabled.team@example.com"]
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-mixed-team-routing-1",
+            "platform": "google_meet",
+        },
+        "participants": ["member.disabled.team@example.com"],
+        "transcript": {
+            "id": "transcript-mixed-team-routing-1",
+            "text": "Debe usar el equipo habilitado del lider.",
+        },
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{lead_user_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 1
+    assert calls["sync"] == 1
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-mixed-team-routing-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["routed_via_team_memberships"] is True
+    assert action_items_sync["matched_team_ids"] == [enabled_team_id]
+    assert len(action_items_sync["target_users"]) == 1
+    assert action_items_sync["target_users"][0]["user_id"] == lead_user_id
+
+
+def test_user_scoped_webhook_does_not_duplicate_lead_when_leading_multiple_enabled_teams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_user_store_cache()
+    clear_team_membership_store_cache()
+
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    team_store = create_team_membership_store(settings)
+
+    lead = user_store.create_user(
+        email="lead.multi@example.com",
+        full_name="Lead Multi Team",
+        password_hash="hashed",
+        role="user",
+    )
+    lead_user_id = str(lead["_id"])
+
+    user_store.upsert_user_settings_values(
+        lead_user_id,
+        {
+            "NOTION_API_TOKEN": "lead-multi-notion-token",
+            "TRANSCRIPTION_AUTOSYNC_ENABLED": "true",
+        },
+    )
+
+    team_one = team_store.create_team(
+        name="Equipo Uno Multi",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id],
+    )
+    team_one_id = str(team_one["_id"])
+    team_store.upsert_membership(
+        team_id=team_one_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+
+    team_two = team_store.create_team(
+        name="Equipo Dos Multi",
+        created_by_user_id=lead_user_id,
+        recipient_user_ids=[lead_user_id],
+    )
+    team_two_id = str(team_two["_id"])
+    team_store.upsert_membership(
+        team_id=team_two_id,
+        user_id=lead_user_id,
+        role="lead",
+        status="accepted",
+    )
+
+    calls = {"sync": 0}
+
+    def fake_action_sync(
+        self: ActionItemSyncService,
+        *,
+        meeting_id: str | None,
+        transcript_text: str | None,
+        transcript_sentences: list[dict[str, object]],
+        participant_emails: list[str],
+        calendar_attendee_emails: list[str] | None = None,
+    ) -> dict[str, object]:
+        calls["sync"] += 1
+        assert self.settings.notion_api_token == "lead-multi-notion-token"
+        assert meeting_id == "meeting-multi-lead-no-dup-1"
+        assert transcript_text == "Debe ejecutarse una sola vez para el lider."
+        assert participant_emails == ["external.multi@example.com"]
+        return {
+            "status": "completed",
+            "extracted_count": 1,
+            "created_count": 1,
+            "google_calendar_status": "not_required_no_due_dates",
+            "google_calendar_created_count": 0,
+            "google_calendar_error": None,
+            "outlook_calendar_status": "not_required_no_due_dates",
+            "outlook_calendar_created_count": 0,
+            "outlook_calendar_error": None,
+            "items": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ActionItemSyncService, "sync", fake_action_sync)
+
+    payload = {
+        "event": "transcript.completed",
+        "meeting": {
+            "id": "meeting-multi-lead-no-dup-1",
+            "platform": "google_meet",
+        },
+        "participants": ["external.multi@example.com"],
+        "transcript": {
+            "id": "transcript-multi-lead-no-dup-1",
+            "text": "Debe ejecutarse una sola vez para el lider.",
+        },
+    }
+    response = client.post(
+        f"/api/transcriptions/webhooks/fireflies/{lead_user_id}",
+        json=payload,
+    )
+
+    assert response.status_code == 202
+    response_payload = response.json()
+    assert response_payload["action_items_sync_status"] == "completed"
+    assert response_payload["action_items_created_count"] == 1
+    assert calls["sync"] == 1
+
+    lookup_response = client.get("/api/transcriptions/received/by-meeting/meeting-multi-lead-no-dup-1")
+    assert lookup_response.status_code == 200
+    stored_record = lookup_response.json()
+    action_items_sync = stored_record["action_items_sync"]
+    assert action_items_sync["routed_via_team_memberships"] is True
+    assert sorted(action_items_sync["matched_team_ids"]) == sorted([team_one_id, team_two_id])
+    assert len(action_items_sync["target_users"]) == 1
+    assert action_items_sync["target_users"][0]["user_id"] == lead_user_id
+    assert action_items_sync["created_count"] == 1
+
+
 def test_user_scoped_read_ai_webhook_routes_only_to_checked_recipients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
