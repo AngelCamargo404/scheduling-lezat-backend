@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -24,24 +24,14 @@ logger = logging.getLogger(__name__)
 
 @router.post(
     "/webhooks/fireflies",
-    response_model=TranscriptionWebhookResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
 )
 async def receive_fireflies_webhook(
     request: Request,
-) -> TranscriptionWebhookResponse:
-    payload, raw_body = await _load_payload_and_raw_body(request)
-    logger.info(
-        "Webhook received provider=fireflies path=%s has_signature=%s",
-        str(request.url.path),
-        bool(request.headers.get("x-hub-signature")),
-    )
-    return _process_webhook(
+) -> NoReturn:
+    _reject_unscoped_webhook(
         provider=TranscriptionProvider.fireflies,
-        payload=payload,
         request=request,
-        raw_body=raw_body,
-        signature=request.headers.get("x-hub-signature"),
     )
 
 
@@ -73,17 +63,13 @@ async def receive_fireflies_webhook_for_user(
 
 @router.post(
     "/webhooks/read-ai",
-    response_model=TranscriptionWebhookResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
 )
 def receive_read_ai_webhook(
-    payload: dict[str, Any],
     request: Request,
-) -> TranscriptionWebhookResponse:
-    logger.info("Webhook received provider=read_ai path=%s", str(request.url.path))
-    return _process_webhook(
+) -> NoReturn:
+    _reject_unscoped_webhook(
         provider=TranscriptionProvider.read_ai,
-        payload=payload,
         request=request,
     )
 
@@ -298,4 +284,27 @@ def _assert_user_exists(user_id: str) -> None:
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="User not found for webhook URL.",
+    )
+
+
+def _reject_unscoped_webhook(
+    *,
+    provider: TranscriptionProvider,
+    request: Request,
+) -> NoReturn:
+    provider_path_segment = (
+        "fireflies" if provider == TranscriptionProvider.fireflies else "read-ai"
+    )
+    scoped_path_hint = f"/api/transcriptions/webhooks/{provider_path_segment}/{{user_id}}"
+    logger.warning(
+        "Webhook rejected provider=%s path=%s reason=missing_user_id_in_url",
+        provider.value,
+        str(request.url.path),
+    )
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            "Webhook URL must include a user_id. "
+            f"Configure it as {scoped_path_hint}."
+        ),
     )

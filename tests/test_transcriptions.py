@@ -58,6 +58,47 @@ def _get_admin_token() -> str:
     return response.json()["access_token"]
 
 
+def _get_default_webhook_user_id() -> str:
+    settings = get_settings()
+    user_store = create_user_store(settings)
+    admin_user = user_store.get_user_by_email("admin")
+    if admin_user:
+        return str(admin_user["_id"])
+    user = user_store.create_user(
+        email="webhook.default@example.com",
+        full_name="Webhook Default",
+        password_hash="hashed",
+        role="user",
+    )
+    return str(user["_id"])
+
+
+def _fireflies_webhook_url() -> str:
+    return f"/api/transcriptions/webhooks/fireflies/{_get_default_webhook_user_id()}"
+
+
+def _read_ai_webhook_url() -> str:
+    return f"/api/transcriptions/webhooks/read-ai/{_get_default_webhook_user_id()}"
+
+
+def test_unscoped_fireflies_webhook_is_rejected() -> None:
+    response = client.post(
+        "/api/transcriptions/webhooks/fireflies",
+        json={"meetingId": "meeting-without-user-scope"},
+    )
+    assert response.status_code == 422
+    assert "user_id" in response.json()["detail"]
+
+
+def test_unscoped_read_ai_webhook_is_rejected() -> None:
+    response = client.post(
+        "/api/transcriptions/webhooks/read-ai",
+        json={"meeting": {"external_id": "meeting-without-user-scope"}},
+    )
+    assert response.status_code == 422
+    assert "user_id" in response.json()["detail"]
+
+
 def test_fireflies_webhook_accepts_google_meet_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -74,7 +115,7 @@ def test_fireflies_webhook_accepts_google_meet_transcript(
         },
     }
 
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     data = response.json()
@@ -146,8 +187,8 @@ def test_fireflies_webhook_is_idempotent_with_same_meeting_and_transcript_ids(
         "received_at": "2026-02-19T10:00:00Z",
     }
 
-    first_response = client.post("/api/transcriptions/webhooks/fireflies", json=payload_v1)
-    second_response = client.post("/api/transcriptions/webhooks/fireflies", json=payload_v2)
+    first_response = client.post(_fireflies_webhook_url(), json=payload_v1)
+    second_response = client.post(_fireflies_webhook_url(), json=payload_v2)
 
     assert first_response.status_code == 202
     assert second_response.status_code == 202
@@ -169,7 +210,7 @@ def test_fireflies_webhook_accepts_valid_hmac_signature(
     signature = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
 
     response = client.post(
-        "/api/transcriptions/webhooks/fireflies",
+        _fireflies_webhook_url(),
         content=raw_body,
         headers={
             "Content-Type": "application/json",
@@ -221,7 +262,7 @@ def test_fireflies_webhook_with_payload_transcript_skips_enrichment_fetch(
         },
     }
 
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     data = response.json()
@@ -307,7 +348,7 @@ def test_read_ai_webhook_accepts_google_meet_transcript() -> None:
         },
     }
 
-    response = client.post("/api/transcriptions/webhooks/read-ai", json=payload)
+    response = client.post(_read_ai_webhook_url(), json=payload)
 
     assert response.status_code == 202
     data = response.json()
@@ -357,7 +398,7 @@ def test_read_ai_webhook_with_payload_transcript_skips_enrichment_fetch(
         },
     }
 
-    response = client.post("/api/transcriptions/webhooks/read-ai", json=payload)
+    response = client.post(_read_ai_webhook_url(), json=payload)
 
     assert response.status_code == 202
     data = response.json()
@@ -539,7 +580,7 @@ def test_fireflies_webhook_accepts_request_even_with_invalid_webhook_secret(
         "transcript": {"text": "Texto"},
     }
     response = client.post(
-        "/api/transcriptions/webhooks/fireflies",
+        _fireflies_webhook_url(),
         json=payload,
         headers={"X-Webhook-Secret": "wrong-secret"},
     )
@@ -553,7 +594,7 @@ def test_list_received_transcriptions_returns_saved_items() -> None:
         "meeting": {"id": "meeting-list-1", "platform": "google_meet"},
         "transcript": {"text": "Primera transcripcion"},
     }
-    client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    client.post(_fireflies_webhook_url(), json=payload)
 
     response = client.get("/api/transcriptions/received")
 
@@ -609,7 +650,7 @@ def test_fireflies_webhook_fetches_transcript_with_meeting_id(
         "clientReferenceId": "be582c46-4ac9-4565-9ba6-6ab4264496a8",
         "participants": ["cesar@example.com"],
     }
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     data = response.json()
@@ -648,7 +689,7 @@ def test_backfill_updates_existing_record_by_meeting_id(
         "eventType": "Transcription completed",
         "clientReferenceId": "legacy-ref-1",
     }
-    create_response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    create_response = client.post(_fireflies_webhook_url(), json=payload)
     assert create_response.status_code == 202
     created_data = create_response.json()
     assert created_data["enrichment_status"] == "skipped_missing_api_key"
@@ -745,7 +786,7 @@ def test_webhook_persists_action_items_sync_result(
         },
     }
 
-    create_response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    create_response = client.post(_fireflies_webhook_url(), json=payload)
     assert create_response.status_code == 202
     response_payload = create_response.json()
     assert response_payload["action_items_sync_status"] == "completed"
@@ -856,7 +897,7 @@ def test_webhook_uses_user_integration_tokens_based_on_participant_email(
         "eventType": "Transcription completed",
         "participants": ["adcamargo10@gmail.com"],
     }
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
     assert response.status_code == 202
     response_payload = response.json()
     assert response_payload["action_items_sync_status"] == "completed"
@@ -912,7 +953,7 @@ def test_webhook_skips_action_item_sync_when_autosync_is_disabled(
         "participants": ["autosync.off@example.com"],
         "transcript": {"text": "Crear tarea de seguimiento para el viernes."},
     }
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     response_payload = response.json()
@@ -1030,7 +1071,7 @@ def test_webhook_routes_action_items_to_configured_team_recipients(
             "text": "Registrar acuerdo del equipo.",
         },
     }
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     response_payload = response.json()
@@ -1154,7 +1195,7 @@ def test_webhook_routes_action_items_to_checked_team_recipients_when_participant
             "text": "Registrar acuerdo para todos.",
         },
     }
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     response_payload = response.json()
@@ -1315,7 +1356,7 @@ def test_webhook_reuses_extracted_action_items_for_team_members(
             "text": "Crear entrega de credenciales para el equipo.",
         },
     }
-    response = client.post("/api/transcriptions/webhooks/fireflies", json=payload)
+    response = client.post(_fireflies_webhook_url(), json=payload)
 
     assert response.status_code == 202
     response_payload = response.json()
@@ -2295,3 +2336,4 @@ def test_fireflies_webhook_infers_second_participant_from_speakers_when_email_is
             "role": "speaker",
         },
     ]
+

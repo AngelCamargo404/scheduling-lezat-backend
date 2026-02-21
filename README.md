@@ -134,17 +134,13 @@ http://localhost:8000/api/health
 - `PATCH /api/v1/integrations/settings`
 - `GET /api/scheduling/slots`
 - `GET /api/v1/scheduling/slots`
-- `POST /api/transcriptions/webhooks/fireflies`
 - `POST /api/transcriptions/webhooks/fireflies/{user_id}`
-- `POST /api/transcriptions/webhooks/read-ai`
 - `POST /api/transcriptions/webhooks/read-ai/{user_id}`
 - `GET /api/transcriptions/received`
 - `GET /api/transcriptions/received/by-meeting/{meeting_id}`
 - `POST /api/transcriptions/backfill/{meeting_id}`
 - `GET /api/transcriptions/received/{record_id}`
-- `POST /api/v1/transcriptions/webhooks/fireflies`
 - `POST /api/v1/transcriptions/webhooks/fireflies/{user_id}`
-- `POST /api/v1/transcriptions/webhooks/read-ai`
 - `POST /api/v1/transcriptions/webhooks/read-ai/{user_id}`
 - `GET /api/v1/transcriptions/received`
 - `GET /api/v1/transcriptions/received/by-meeting/{meeting_id}`
@@ -175,6 +171,7 @@ http://localhost:8000/api/health
   - Produccion: `https://scheduling-lezat-backend-production.up.railway.app`
   - Fireflies: `{BACKEND_BASE_URL}/api/transcriptions/webhooks/fireflies/{user_id}`
   - Read AI: `{BACKEND_BASE_URL}/api/transcriptions/webhooks/read-ai/{user_id}`
+- Los endpoints sin `user_id` (`/api/transcriptions/webhooks/fireflies` y `/api/transcriptions/webhooks/read-ai`) se rechazan con `422` y no procesan el payload.
 - Si el `user_id` no existe, el webhook responde `404`.
 - Fireflies: cuando llega `eventType=Transcription completed`, el backend usa `meetingId` para consultar la API GraphQL de Fireflies y traer la transcripcion final.
 - El backend identifica si el meeting corresponde a Google Meet usando `meeting.platform` o `meeting.url`.
