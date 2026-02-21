@@ -161,13 +161,13 @@ def test_non_lead_cannot_manage_team_recipients(client: TestClient) -> None:
     assert update_recipients_response.json()["detail"] == "Only team leads can manage this team."
 
 
-def test_user_can_toggle_team_activation_for_own_membership(client: TestClient) -> None:
+def test_only_lead_can_toggle_team_activation_for_all_members(client: TestClient) -> None:
     lead_token, _ = _register_user(
         client,
         full_name="Lead User",
         email="lead.toggle@example.com",
     )
-    member_token, member_user = _register_user(
+    member_token, _ = _register_user(
         client,
         full_name="Member User",
         email="member.toggle@example.com",
@@ -195,25 +195,26 @@ def test_user_can_toggle_team_activation_for_own_membership(client: TestClient) 
     )
     assert accept_response.status_code == 200
 
-    disable_response = client.patch(
+    disable_as_member_response = client.patch(
         f"/api/team-memberships/teams/{team_id}/activation",
         json={"is_active": False},
         headers={"Authorization": f"Bearer {member_token}"},
     )
-    assert disable_response.status_code == 200
-    disabled_team = disable_response.json()
-    assert disabled_team["current_user_is_active"] is False
-    disabled_member = next(
-        member
-        for member in disabled_team["members"]
-        if member["user"]["user_id"] == member_user["id"]
+    assert disable_as_member_response.status_code == 403
+    assert disable_as_member_response.json()["detail"] == "Only team leads can manage this team."
+
+    disable_as_lead_response = client.patch(
+        f"/api/team-memberships/teams/{team_id}/activation",
+        json={"is_active": False},
+        headers={"Authorization": f"Bearer {lead_token}"},
     )
-    assert disabled_member["is_active"] is False
+    assert disable_as_lead_response.status_code == 200
+    assert disable_as_lead_response.json()["is_active"] is False
 
     enable_response = client.patch(
         f"/api/team-memberships/teams/{team_id}/activation",
         json={"is_active": True},
-        headers={"Authorization": f"Bearer {member_token}"},
+        headers={"Authorization": f"Bearer {lead_token}"},
     )
     assert enable_response.status_code == 200
-    assert enable_response.json()["current_user_is_active"] is True
+    assert enable_response.json()["is_active"] is True

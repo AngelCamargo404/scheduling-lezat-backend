@@ -28,6 +28,10 @@ class TeamMembershipStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def set_team_activation(self, team_id: str, is_active: bool) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_teams_by_ids(self, team_ids: list[str]) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -147,17 +151,18 @@ class InMemoryTeamMembershipStore(TeamMembershipStore):
             "name": name.strip(),
             "created_by_user_id": created_by_user_id.strip(),
             "recipient_user_ids": normalized_recipients,
+            "is_active": True,
             "created_at": now,
             "updated_at": now,
         }
         self._teams_by_id[team_id] = team
-        return dict(team)
+        return _normalize_team_record(team) or {}
 
     def get_team(self, team_id: str) -> dict[str, Any] | None:
         team = self._teams_by_id.get(team_id)
         if not team:
             return None
-        return dict(team)
+        return _normalize_team_record(team)
 
     def set_team_recipients(self, team_id: str, recipient_user_ids: list[str]) -> dict[str, Any] | None:
         team = self._teams_by_id.get(team_id)
@@ -172,11 +177,19 @@ class InMemoryTeamMembershipStore(TeamMembershipStore):
         )
         team["recipient_user_ids"] = normalized_recipients
         team["updated_at"] = datetime.now(UTC)
-        return dict(team)
+        return _normalize_team_record(team)
+
+    def set_team_activation(self, team_id: str, is_active: bool) -> dict[str, Any] | None:
+        team = self._teams_by_id.get(team_id)
+        if not team:
+            return None
+        team["is_active"] = bool(is_active)
+        team["updated_at"] = datetime.now(UTC)
+        return _normalize_team_record(team)
 
     def list_teams_by_ids(self, team_ids: list[str]) -> list[dict[str, Any]]:
         team_by_id = {
-            team_id: dict(team)
+            team_id: (_normalize_team_record(team) or {})
             for team_id, team in self._teams_by_id.items()
             if team_id in set(team_ids)
         }
@@ -462,6 +475,7 @@ class MongoTeamMembershipStore(TeamMembershipStore):
             "name": name.strip(),
             "created_by_user_id": created_by_user_id.strip(),
             "recipient_user_ids": normalized_recipients,
+            "is_active": True,
             "created_at": now,
             "updated_at": now,
         }
@@ -473,7 +487,7 @@ class MongoTeamMembershipStore(TeamMembershipStore):
         if not object_id:
             return None
         record = self._teams.find_one({"_id": object_id})
-        return _serialize_record(record)
+        return _normalize_team_record(_serialize_record(record))
 
     def set_team_recipients(self, team_id: str, recipient_user_ids: list[str]) -> dict[str, Any] | None:
         object_id = _to_object_id(team_id)
@@ -497,6 +511,21 @@ class MongoTeamMembershipStore(TeamMembershipStore):
         )
         return self.get_team(team_id)
 
+    def set_team_activation(self, team_id: str, is_active: bool) -> dict[str, Any] | None:
+        object_id = _to_object_id(team_id)
+        if not object_id:
+            return None
+        self._teams.update_one(
+            {"_id": object_id},
+            {
+                "$set": {
+                    "is_active": bool(is_active),
+                    "updated_at": datetime.now(UTC),
+                },
+            },
+        )
+        return self.get_team(team_id)
+
     def list_teams_by_ids(self, team_ids: list[str]) -> list[dict[str, Any]]:
         object_ids = []
         for team_id in team_ids:
@@ -507,7 +536,7 @@ class MongoTeamMembershipStore(TeamMembershipStore):
             return []
         records = list(self._teams.find({"_id": {"$in": object_ids}}))
         by_id = {
-            str(record.get("_id")): _serialize_record(record)
+            str(record.get("_id")): (_normalize_team_record(_serialize_record(record)) or {})
             for record in records
         }
         ordered: list[dict[str, Any]] = []
@@ -770,6 +799,14 @@ def _serialize_record(record: Any) -> dict[str, Any] | None:
         return None
     payload = dict(record)
     payload["_id"] = str(record.get("_id", ""))
+    return payload
+
+
+def _normalize_team_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    payload = dict(record)
+    payload["is_active"] = bool(payload.get("is_active", True))
     return payload
 
 

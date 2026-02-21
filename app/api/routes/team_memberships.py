@@ -61,13 +61,13 @@ def update_team_recipients(
     "/teams/{team_id}/activation",
     response_model=TeamConfiguration,
 )
-def update_current_user_team_activation(
+def update_team_activation(
     team_id: str,
     payload: TeamMembershipActivationUpdateRequest,
     current_user: CurrentUserResponse = Depends(require_current_user),
 ) -> TeamConfiguration:
     service = TeamMembershipService()
-    return service.update_current_user_membership_activation(
+    return service.update_team_activation(
         current_user=current_user,
         team_id=team_id,
         payload=payload,

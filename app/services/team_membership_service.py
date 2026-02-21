@@ -283,7 +283,7 @@ class TeamMembershipService:
             current_user_id=current_user.id,
         )
 
-    def update_current_user_membership_activation(
+    def update_team_activation(
         self,
         *,
         current_user: CurrentUserResponse,
@@ -297,42 +297,19 @@ class TeamMembershipService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Team not found.",
             )
+        self._assert_user_can_manage_team(current_user.id, normalized_team_id)
 
-        accepted_memberships = self.team_store.list_memberships_for_team(
+        updated_team = self.team_store.set_team_activation(
             normalized_team_id,
-            status="accepted",
+            payload.is_active,
         )
-        current_membership = None
-        for membership in accepted_memberships:
-            membership_user_id = str(membership.get("user_id", "")).strip()
-            if membership_user_id == current_user.id:
-                current_membership = membership
-                break
-        if not current_membership:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You must be an accepted member of this team.",
-            )
-
-        updated_membership = self.team_store.set_membership_activation(
-            team_id=normalized_team_id,
-            user_id=current_user.id,
-            is_active=payload.is_active,
-        )
-        if not updated_membership:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Team membership not found.",
-            )
-
-        refreshed_team = self.team_store.get_team(normalized_team_id)
-        if not refreshed_team:
+        if not updated_team:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Team not found.",
             )
         return self._build_team_configuration(
-            team=refreshed_team,
+            team=updated_team,
             current_user_id=current_user.id,
         )
 
@@ -379,13 +356,10 @@ class TeamMembershipService:
             team_id = str(matched_team.get("_id", "")).strip()
             if not team_id:
                 continue
+            if not bool(matched_team.get("is_active", True)):
+                continue
             matched_team_ids.append(team_id)
             accepted_memberships = self.team_store.list_memberships_for_team(team_id, status="accepted")
-            membership_by_user_id = {
-                str(membership.get("user_id", "")).strip(): membership
-                for membership in accepted_memberships
-                if str(membership.get("user_id", "")).strip()
-            }
             active_accepted_user_ids = {
                 str(membership.get("user_id", "")).strip()
                 for membership in accepted_memberships
@@ -397,10 +371,6 @@ class TeamMembershipService:
                 for user_id in matched_team.get("recipient_user_ids", [])
                 if isinstance(user_id, str) and user_id.strip()
             }
-            if normalized_lead_user_id:
-                lead_membership = membership_by_user_id.get(normalized_lead_user_id)
-                if lead_membership and not bool(lead_membership.get("is_active", True)):
-                    continue
             configured_recipients = sorted(configured_recipient_user_ids & active_accepted_user_ids)
             if not configured_recipients:
                 continue
@@ -463,6 +433,7 @@ class TeamMembershipService:
         }
         can_manage = False
         current_user_is_active = True
+        team_is_active = bool(team.get("is_active", True))
         current_membership = membership_by_user_id.get(current_user_id)
         if current_membership:
             current_user_is_active = bool(current_membership.get("is_active", True))
@@ -510,6 +481,7 @@ class TeamMembershipService:
             name=str(team.get("name", "")).strip(),
             created_by_user_id=str(team.get("created_by_user_id", "")).strip(),
             can_manage=can_manage,
+            is_active=team_is_active,
             current_user_is_active=current_user_is_active,
             recipients=recipients,
             members=members,

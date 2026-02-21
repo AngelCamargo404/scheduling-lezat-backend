@@ -34,6 +34,7 @@ class TeamConfiguration(BaseModel):
     name: str
     created_by_user_id: str
     can_manage: bool
+    is_active: bool = True
     current_user_is_active: bool = True
     recipients: list[TeamUserSummary] = Field(default_factory=list)
     members: list[TeamMember] = Field(default_factory=list)

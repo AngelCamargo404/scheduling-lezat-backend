@@ -1777,11 +1777,7 @@ def test_user_scoped_webhook_falls_back_to_independent_user_when_all_teams_are_d
         role="member",
         status="accepted",
     )
-    team_store.set_membership_activation(
-        team_id=team_id,
-        user_id=lead_user_id,
-        is_active=False,
-    )
+    team_store.set_team_activation(team_id, False)
 
     calls = {"sync": 0}
 
